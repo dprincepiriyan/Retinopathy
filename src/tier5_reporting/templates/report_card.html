@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Clinical Retinal Screening Report — {{ report.patient_id }}</title>
+  <style>{{ inline_css | safe }}</style>
+</head>
+<body>
+  <div class="report-container">
+    <div class="header-bar">
+      <div class="header-title">
+        <h1>{{ report.institution_name }}</h1>
+        <p>Automated Multi-Stage Retinal Pathology Triage &amp; ICDR Severity Report (Pipeline {{ report.pipeline_version }})</p>
+      </div>
+      <div>
+        <strong>Confidence Tier:</strong> {{ report.overall_confidence_tier }}
+      </div>
+    </div>
+
+    <div class="patient-meta">
+      <div class="meta-item">
+        <span class="label">Patient ID</span>
+        <span class="value">{{ report.patient_id }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="label">Patient Name</span>
+        <span class="value">{{ report.patient_name }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="label">Age</span>
+        <span class="value">{{ report.patient_age if report.patient_age is not none else "N/A" }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="label">Examination Date</span>
+        <span class="value">{{ report.exam_date }}</span>
+      </div>
+    </div>
+
+    <div class="triage-banner badge-{{ report.badge_color }}">
+      <div style="font-size: 15px; font-weight: 700; margin-bottom: 4px;">
+        Patient-Level Assessment ({{ report.patient_worse_eye }}): {{ report.patient_overall_grade_label }}
+      </div>
+      <div style="font-size: 12px; margin-bottom: 4px;">
+        <strong>Referral Urgency:</strong> {{ report.referral_urgency }}
+        &nbsp;|&nbsp; <strong>Timeline:</strong> {{ report.referral_timeline }}
+        &nbsp;|&nbsp; <strong>Human Review Flag:</strong> {{ "REQUIRED" if report.requires_human_review else "Routine" }}
+      </div>
+      <div style="font-size: 12px;">
+        <strong>Recommended Clinical Action:</strong> {{ report.recommended_clinical_action }}
+      </div>
+    </div>
+
+    <div class="bilateral-grid">
+      {% for title, eye in [("Right Eye (OD)", report.od_findings), ("Left Eye (OS)", report.os_findings)] %}
+      <div class="eye-card">
+        <h3>{{ title }}</h3>
+        {% if eye is none %}
+          <p>No scan provided for {{ title }}.</p>
+        {% else %}
+          <div class="metric-row">
+            <span><strong>IQA Gradability:</strong></span>
+            <span>{{ "Gradable" if eye.is_gradable else "UNGRADABLE" }} (Score: {{ "%.2f"|format(eye.iqa_quality_score) }})</span>
+          </div>
+          <div class="metric-row">
+            <span><strong>DR Severity Grade:</strong></span>
+            <span><strong>{{ eye.displayed_grade_label }}</strong></span>
+          </div>
+          <div class="metric-row">
+            <span><strong>95% Conformal Prediction Set:</strong></span>
+            <span>{{ eye.conformal_prediction_set }} ({{ eye.confidence_tier }})</span>
+          </div>
+          <div class="metric-row">
+            <span><strong>Referable DR (Grade &ge; 2) Prob:</strong></span>
+            <span>{{ "%.1f"|format(eye.prob_referable_dr * 100) }}%</span>
+          </div>
+          <div class="metric-row">
+            <span><strong>Stage-1 Multi-Label Triage:</strong></span>
+            <span>DR: {{ "%.2f"|format(eye.prob_dr) }} | Glaucoma: {{ "%.2f"|format(eye.prob_glaucoma) }} | Cataract: {{ "%.2f"|format(eye.prob_cataract) }}</span>
+          </div>
+          <div class="metric-row">
+            <span><strong>ONH Biometrics (vCDR / ISNT):</strong></span>
+            <span>vCDR: {{ "%.2f"|format(eye.onh_biomarkers.vcdr) }} | ISNT Violated: {{ "Yes" if eye.onh_biomarkers.isnt_rule_violated else "No" }}</span>
+          </div>
+          <div class="metric-row">
+            <span><strong>Dominant Quadrant (4-2-1 Rule):</strong></span>
+            <span>{{ eye.dominant_quadrant }} ({{ eye.active_quadrant_count }}/4 active)</span>
+          </div>
+          <p style="font-size: 11.5px; color: #334155; margin-top: 8px;">
+            {{ eye.eye_narrative_summary }}
+          </p>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="other-pathology-box">
+      <strong>{{ report.bilateral_other_pathologies_summary }}</strong>
+    </div>
+
+    {% if report.doctor_verification_notes %}
+    <div class="other-pathology-box">
+      <strong>Reviewing Ophthalmologist Notes:</strong> {{ report.doctor_verification_notes }}
+    </div>
+    {% endif %}
+
+    <div class="signature-box">
+      <div>Deterministic Template Engine (Zero LLM Hallucination Guarantee)</div>
+      <div>
+        <strong>Verified By:</strong> {{ report.doctor_signature if report.doctor_signature else "Pending Clinician Sign-Off" }}
+      </div>
+    </div>
+  </div>
+</body>
+</html>

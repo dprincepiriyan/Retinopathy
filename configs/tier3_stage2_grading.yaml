@@ -1,0 +1,56 @@
+# Tier 3: Stage-2 Fine-Grained DR Severity Grading (All Gradable Scans)
+stage2_grading:
+  evaluate_all_gradable_scans: true  # Eliminates Stage-1 cascade false negatives
+  num_classes: 5
+  class_names:
+    0: "No DR"
+    1: "Mild NPDR"
+    2: "Moderate NPDR"
+    3: "Severe NPDR"
+    4: "Proliferative DR"
+  referable_grade_cutoff: 2          # Grade >= 2 is clinically referable DR
+
+  resvit_pro:
+    cnn_backbone: "resnet50d"
+    vit_backbone: "swinv2_tiny_window16_256"
+    fpn_channels: 256
+    preserve_stride4_features: true  # Sensitive to <10px microaneurysms
+    cross_attention_heads: 8
+    cross_attention_dim: 256
+    dropout: 0.3
+
+  lesion_guided_net:
+    enabled: true
+    lesion_channels: 4               # [MA, HE, EX, CWS]
+    aux_loss_weight: 0.30
+
+  gem_pooling:
+    initial_p: 3.0                   # Learnable p-norm prevents tiny microaneurysms from washing out
+    learnable: true
+    eps: 1.0e-6
+
+  tri_head:
+    ordinal_type: "CORAL"            # 4 binary cumulative thresholds (y > 0, y > 1, y > 2, y > 3)
+    use_referable_binary_head: true  # Explicit P(Grade >= 2)
+    use_continuous_regressor: true   # Scalar s in [0, 4.5] for Nelder-Mead QWK optimization
+    loss_weights:
+      ordinal_focal: 1.0
+      soft_qwk: 0.75
+      referable_bce: 0.50
+      continuous_smooth_l1: 0.40
+
+  curriculum_training:
+    phase_a:
+      resolution: 512
+      epochs: 15
+      batch_size: 24
+      lr: 2.0e-4
+      freeze_stride4_fpn: false
+      soft_qwk_ramp: 0.3
+    phase_b:
+      resolution: 768
+      epochs: 20
+      batch_size: 12
+      lr: 5.0e-5
+      enable_gem_learning: true
+      soft_qwk_ramp: 1.0

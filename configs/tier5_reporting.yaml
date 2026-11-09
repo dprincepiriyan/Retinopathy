@@ -1,0 +1,51 @@
+# Tier 5: Clinical Reporting, Safety Gate & Doctor Dashboard
+tier5_reporting:
+  institution_name: "RetinaNet-Pro Automated Tele-Ophthalmology Screening Unit"
+  pipeline_version: "3.0.0-LocalEdge"
+
+  safety_gate:
+    referable_dr_probability_cutoff: 0.38   # High-sensitivity threshold for Grade >= 2
+    glaucoma_probability_cutoff: 0.45
+    cataract_probability_cutoff: 0.50
+    max_ensemble_std_for_high_conf: 0.12
+    max_ensemble_std_for_mod_conf: 0.25
+    abstain_on_ungradable_iqa: true
+    abstain_on_conformal_size_ge: 3
+
+  referral_timelines:
+    0:
+      grade_label: "Grade 0 — No Apparent Diabetic Retinopathy"
+      urgency: "Routine Rescreening"
+      timeline: "12 Months"
+      badge_color: "green"
+      clinical_action: "Maintain annual dilated fundus screening and systemic glycemic/blood pressure control."
+    1:
+      grade_label: "Grade 1 — Mild Non-Proliferative Diabetic Retinopathy (NPDR)"
+      urgency: "Enhanced Monitoring"
+      timeline: "6–12 Months"
+      badge_color: "blue"
+      clinical_action: "Repeat fundus examination in 6–12 months; optimize HbA1c and lipid profile."
+    2:
+      grade_label: "Grade 2 — Moderate Non-Proliferative Diabetic Retinopathy (NPDR)"
+      urgency: "Referable DR — Non-Urgent Ophthalmic Referral"
+      timeline: "3–6 Months"
+      badge_color: "amber"
+      clinical_action: "Refer to ophthalmologist within 3–6 months for comprehensive retinal evaluation and OCT macular assessment."
+    3:
+      grade_label: "Grade 3 — Severe Non-Proliferative Diabetic Retinopathy (NPDR)"
+      urgency: "Urgent Ophthalmic Referral"
+      timeline: "2–4 Weeks"
+      badge_color: "orange"
+      clinical_action: "Urgent referral to retinal specialist within 2–4 weeks; high risk of progression to proliferative disease."
+    4:
+      grade_label: "Grade 4 — Proliferative Diabetic Retinopathy (PDR)"
+      urgency: "Immediate Sight-Threatening Emergency Referral"
+      timeline: "< 48 Hours"
+      badge_color: "red"
+      clinical_action: "Immediate referral (<48 hours) to vitreoretinal specialist for panretinal photocoagulation (PRP) or anti-VEGF therapy."
+    abstain:
+      grade_label: "Ungradable / Ambiguous Scan — Automated Grade Suppressed"
+      urgency: "Manual Specialist Review / Recapture Required"
+      timeline: "Immediate Recapture or Manual Triage"
+      badge_color: "gray"
+      clinical_action: "Automated grading suppressed by clinical safety gate. Please re-acquire mydriatic fundus photograph or route directly to an ophthalmologist."

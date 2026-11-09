@@ -1,0 +1,48 @@
+# Tier 2: Stage-1 Multi-Label Disease Triage & Glaucoma ONH Specialist
+stage1_triage:
+  task_type: "multi_label_binary"    # Independent Sigmoids (never mutually exclusive Softmax)
+  classes:
+    - "diabetic_retinopathy"
+    - "glaucoma"
+    - "cataract"
+  input_resolution: 512
+
+  models:
+    strong_cnn:
+      backbone: "efficientnet_b0"
+      pretrained: true
+      se_reduction: 16
+      dropout: 0.3
+    convnext_v2:
+      backbone: "convnextv2_tiny"
+      pretrained: true
+      use_coordinate_attention: true
+      coord_attn_reduction: 32
+      dropout: 0.3
+    retfound_lora:
+      backbone: "vit_base_patch16_224"
+      lora_rank: 16
+      lora_alpha: 32
+      lora_dropout: 0.1
+
+  glaucoma_onh_specialist:
+    roi_size: 256
+    unet_base_channels: 32
+    vcdr_suspicion_threshold: 0.55   # Vertical Cup-to-Disc Ratio >= 0.55 flags glaucoma risk
+    vcdr_high_risk_threshold: 0.65
+    check_isnt_rule: true            # Inferior >= Superior >= Nasal >= Temporal rim thickness
+
+  loss:
+    name: "AsymmetricFocalLoss"
+    gamma_neg: 4.0
+    gamma_pos: 1.0
+    clip: 0.05
+    label_smoothing: 0.02
+
+  training:
+    batch_size: 32
+    epochs: 25
+    learning_rate: 3.0e-4
+    weight_decay: 1.0e-2
+    ema_decay: 0.999
+    mixed_precision: "fp16"

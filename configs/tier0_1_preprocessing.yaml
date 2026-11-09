@@ -1,0 +1,49 @@
+# Tier 0 & Tier 1: Deterministic Clinical Preprocessing & Domain Harmonization
+tier0_preprocessing:
+  fov_crop:
+    enabled: true
+    otsu_blur_kernel: 5
+    min_radius_ratio: 0.25
+    aspect_preserving_pad: true
+    pad_mode: "constant"  # Zero-padding to preserve circular optic disc aspect ratio (1:1)
+  resolutions:
+    stage1_size: 512
+    stage2_phase_a_size: 512
+    stage2_phase_b_size: 768
+    onh_roi_size: 256
+  ben_graham:
+    enabled: true
+    sigma_radius_divisor: 30.0
+    alpha: 4.0
+    beta: -4.0
+    gamma: 128.0
+  clahe:
+    enabled: true
+    clip_limit: 2.0
+    tile_grid_size: [8, 8]
+    apply_green_channel: true
+    apply_lab_l_channel: true
+    green_blend_weight: 0.35
+
+iqa_gatekeeper:
+  min_laplacian_variance: 18.0       # Below this flags severe motion/defocus blur
+  max_overexposed_fraction: 0.18     # Fraction of FOV pixels > 245 indicating flash glare
+  min_underexposed_mean: 20.0        # Mean FOV intensity below this indicates dark/occluded scan
+  min_circularity_score: 0.65
+
+tier1_purifiers:
+  fda:
+    enabled_at_inference: true
+    beta_low_freq_window: 0.015      # Low-frequency amplitude swap window (preserves 100% phase)
+    blend_alpha: 0.65
+  residual_cdae:
+    enabled: true
+    base_channels: 32
+    residual_scale_alpha: 0.25       # x_clean = x + alpha * Delta_x
+    charbonnier_eps: 1.0e-3
+    ssim_weight: 0.4
+  cyclegan_lesion_locked:
+    training_only: true
+    high_pass_lesion_lock_weight: 10.0
+    cycle_consistency_weight: 10.0
+    identity_loss_weight: 5.0

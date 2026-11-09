@@ -1,0 +1,43 @@
+# Tier 4: Meta-Ensembling, Threshold Optimization, Calibration & Explainability
+tier4_ensemble:
+  tta:
+    enabled: true
+    views: 8                         # 8-view Dihedral group (rotations 0/90/180/270 x horizontal flip)
+
+  qwk_threshold_optimizer:
+    method: "Nelder-Mead"
+    initial_thresholds: [0.5, 1.5, 2.5, 3.5]
+    max_iter: 1000
+    xatol: 1.0e-4
+    fatol: 1.0e-5
+
+  temperature_scaling:
+    enabled: true
+    target_max_ece: 0.04
+    lr: 0.01
+    max_iter: 200
+
+  conformal_prediction:
+    alpha: 0.05                      # 95% marginal coverage guarantee (1 - alpha = 0.95)
+    score_type: "aps"                # Adaptive Prediction Sets / cumulative softmax mass
+    max_acceptable_set_size: 2       # Sets of size >= 3 trigger Low Confidence / Human Review
+
+  stacking_meta:
+    learner: "ridge_or_lgbm"
+    ridge_alpha: 1.0
+    lgbm_params:
+      n_estimators: 120
+      learning_rate: 0.03
+      num_leaves: 15
+      subsample: 0.8
+      colsample_bytree: 0.8
+
+  explainability:
+    gradcam_pp:
+      target_layer: "fpn_stride4"
+      heatmap_alpha: 0.45
+      top_k_lesion_candidates: 5
+    attention_rollout:
+      discard_ratio: 0.85
+      head_fusion: "mean"
+      quadrants: ["Superior-Temporal", "Superior-Nasal", "Inferior-Temporal", "Inferior-Nasal"]

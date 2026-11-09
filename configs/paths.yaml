@@ -1,0 +1,42 @@
+# Dataset & Artifact Paths Configuration
+datasets:
+  eyepacs:
+    root_dir: "data/raw/eyepacs"
+    labels_csv: "data/raw/eyepacs/trainLabels.csv"
+    image_dir: "data/raw/eyepacs/train"
+  messidor2:
+    root_dir: "data/raw/messidor2"
+    labels_csv: "data/raw/messidor2/messidor_data.csv"
+    image_dir: "data/raw/messidor2/images"
+  aptos2019:
+    root_dir: "data/raw/aptos2019"
+    labels_csv: "data/raw/aptos2019/train.csv"
+    image_dir: "data/raw/aptos2019/train_images"
+  idrid:
+    root_dir: "data/raw/idrid"
+    grading_csv: "data/raw/idrid/labels/train.csv"
+    segmentation_dir: "data/raw/idrid/segmentation_masks"
+    optic_disc_dir: "data/raw/idrid/optic_disc_masks"
+  refuge_odir:
+    root_dir: "data/raw/odir5k"
+    labels_csv: "data/raw/odir5k/full_df.csv"
+    glaucoma_masks_dir: "data/raw/refuge/masks"
+
+cache:
+  preprocessed_512_dir: "data/processed/tensors_512"
+  preprocessed_768_dir: "data/processed/tensors_768"
+  fda_reference_spectrum: "data/processed/fda_canonical_amplitude.npy"
+  dedup_manifest: "data/processed/clean_dedup_splits.csv"
+
+checkpoints:
+  stage1_triage: "checkpoints/stage1_multi_label_best.pth"
+  stage1_onh_unet: "checkpoints/stage1_onh_unet_best.pth"
+  stage2_resvit_pro: "checkpoints/stage2_resvit_pro_768_best.pth"
+  stage2_lesion_guided: "checkpoints/stage2_lesion_guided_best.pth"
+  tier1_cdae: "checkpoints/tier1_residual_cdae_best.pth"
+  tier4_meta_model: "checkpoints/tier4_stacking_meta.pkl"
+  calibration_params: "checkpoints/tier4_calibration_conformal.json"
+
+outputs:
+  reports_dir: "outputs/clinical_reports"
+  heatmaps_dir: "outputs/explainability"
