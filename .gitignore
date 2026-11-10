@@ -20,13 +20,16 @@ env/
 htmlcov/
 
 # Model checkpoints & large data artifacts
-checkpoints/
-data/
+/checkpoints/
+/data/
+/datasets/
+!src/data/
 *.pth
 *.pt
 *.onnx
 *.lmdb
 *.zip
+*.npy
 
 # IDE & OS
 .vscode/
