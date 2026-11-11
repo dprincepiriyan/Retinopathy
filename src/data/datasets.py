@@ -212,12 +212,15 @@ class PreprocessedManifestDataset:
         only_fold: Optional[int] = None,
         resolution: int = 512,
         data_root_override: Optional[str] = None,
+        augment: bool = False,
     ) -> None:
         import csv
         from pathlib import Path
 
+        self.manifest_dir = Path(manifest_csv).resolve().parent
         self.resolution = resolution
         self.data_root_override = Path(data_root_override) if data_root_override else None
+        self.augment = augment
         self.rows: List[Dict[str, str]] = []
 
         with open(manifest_csv, "r", encoding="utf-8") as f:
@@ -241,9 +244,14 @@ class PreprocessedManifestDataset:
 
         row = self.rows[idx]
         col = "path_768" if (self.resolution == 768 and row.get("path_768")) else "path_512"
-        img_path = Path(row.get(col) or row.get("image_path", ""))
+        raw_path_str = row.get(col) or row.get("path_512") or row.get("image_path", "")
+        img_path = Path(raw_path_str)
         if self.data_root_override is not None:
             img_path = self.data_root_override / img_path.parent.name / img_path.name
+        elif not img_path.exists():
+            candidate = self.manifest_dir / img_path.parent.name / img_path.name
+            if candidate.exists():
+                img_path = candidate
 
         bgr = cv2.imread(str(img_path))
         if bgr is None:
@@ -251,6 +259,17 @@ class PreprocessedManifestDataset:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         if rgb.shape[0] != self.resolution or rgb.shape[1] != self.resolution:
             rgb = cv2.resize(rgb, (self.resolution, self.resolution), interpolation=cv2.INTER_LINEAR)
+
+        if self.augment:
+            # Lossless D4 dihedral group transforms preserve <10px microaneurysms without interpolation blur
+            if np.random.rand() < 0.5:
+                rgb = np.fliplr(rgb)
+            if np.random.rand() < 0.5:
+                rgb = np.flipud(rgb)
+            k_rot = int(np.random.randint(0, 4))
+            if k_rot > 0:
+                rgb = np.rot90(rgb, k=k_rot)
+            rgb = np.ascontiguousarray(rgb)
 
         tensor_chw = torch.from_numpy(np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1)))
         dr_grade = int(row.get("dr_grade", 0))

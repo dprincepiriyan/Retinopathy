@@ -29,6 +29,8 @@ htmlcov/
 *.onnx
 *.lmdb
 *.zip
+*.tar.gz
+*.tgz
 *.npy
 
 # IDE & OS

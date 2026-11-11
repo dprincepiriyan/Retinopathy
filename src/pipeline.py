@@ -49,21 +49,79 @@ class EyeVisualArtifacts:
 class RetinaNetProPipeline:
     """Unified 6-Tier local edge inference pipeline (<500ms on laptop GPU or CPU)."""
 
-    def __init__(self, device: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        device: Optional[str] = None,
+        checkpoints_dir: Optional[str] = None,
+    ) -> None:
+        import json
+        from pathlib import Path
+
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
+        project_root = Path(__file__).resolve().parents[1]
+        ckpt_dir = Path(checkpoints_dir) if checkpoints_dir else (project_root / "checkpoints")
+
         self.iqa_gate = IQAGatekeeper()
-        self.preprocessor = Tier0Preprocessor(stage1_size=256, stage2_size=256)
         self.fda = FourierDomainAdapter()
+        fda_path = project_root / "data" / "processed" / "fda_canonical_amplitude.npy"
+        if fda_path.exists():
+            try:
+                self.fda.reference_amplitude = np.load(str(fda_path))
+            except Exception:
+                pass
+
         self.cdae = ResidualAttentionUNetCDAE(base_channels=16).to(self.device).eval()
-        self.stage1_ensemble = MultiLabelTriageEnsemble(base_channels=16).to(self.device).eval()
-        self.stage2_resvit = ResViTPro(fpn_dim=32, num_classes=5, num_heads=4).to(self.device).eval()
+
+        # Auto-detect and load Stage-1 Multi-Label Triage checkpoint if present
+        s1_ckpt_path = ckpt_dir / "stage1_multi_label_best.pth"
+        s1_base_ch = 16
+        s1_state = None
+        if s1_ckpt_path.exists():
+            s1_state = torch.load(str(s1_ckpt_path), map_location=self.device, weights_only=True)
+            if "strong_cnn.stem.0.weight" in s1_state:
+                s1_base_ch = int(s1_state["strong_cnn.stem.0.weight"].shape[0])
+        self.stage1_ensemble = MultiLabelTriageEnsemble(base_channels=s1_base_ch).to(self.device).eval()
+        if s1_state is not None:
+            self.stage1_ensemble.load_state_dict(s1_state, strict=False)
+
+        # Auto-detect and load Stage-2 ResViT-Pro checkpoint if present
+        s2_ckpt_path = ckpt_dir / "stage2_resvit_pro_768_best.pth"
+        s2_fpn_dim = 32
+        s2_state = None
+        if s2_ckpt_path.exists():
+            s2_state = torch.load(str(s2_ckpt_path), map_location=self.device, weights_only=True)
+            if "stage_s4.conv.0.weight" in s2_state:
+                s2_fpn_dim = int(s2_state["stage_s4.conv.0.weight"].shape[0])
+        self.stage2_resvit = ResViTPro(fpn_dim=s2_fpn_dim, num_classes=5, num_heads=4).to(self.device).eval()
+        if s2_state is not None:
+            self.stage2_resvit.load_state_dict(s2_state, strict=False)
+
+        # Use 512/768 clinical resolutions when trained checkpoints are loaded, fast 256px for unit tests
+        has_trained_weights = s1_state is not None or s2_state is not None
+        self.preprocessor = Tier0Preprocessor(
+            stage1_size=512 if has_trained_weights else 256,
+            stage2_size=768 if has_trained_weights else 256,
+        )
 
         self.qwk_optimizer = NelderMeadQWKOptimizer()
         self.conformal = SplitConformalPredictor(alpha=0.05)
+
+        cal_path = ckpt_dir / "calibration_params.json"
+        if cal_path.exists():
+            try:
+                with open(cal_path, "r", encoding="utf-8") as f:
+                    cal_data = json.load(f)
+                if "qwk_thresholds" in cal_data:
+                    self.qwk_optimizer.thresholds_ = np.array(cal_data["qwk_thresholds"], dtype=np.float64)
+                if "conformal_q_hat" in cal_data:
+                    self.conformal.q_hat_ = float(cal_data["conformal_q_hat"])
+            except Exception:
+                pass
+
         self.gradcam = GradCAMPlusPlus()
         self.rollout = CrossAttentionRollout()
         self.aggregator = BilateralClinicalAggregator()
