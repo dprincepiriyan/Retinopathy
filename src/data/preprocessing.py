@@ -190,9 +190,9 @@ class Tier0Preprocessor:
         )
         bg_rgb = ben_graham_normalization(enhanced_rgb, fov_mask, radius)
 
-        # Resize using Lanczos / Area interpolation to preserve <10px microaneurysms
-        img_512 = cv2.resize(enhanced_rgb, (self.stage1_size, self.stage1_size), interpolation=cv2.INTER_LINEAR)
-        img_768 = cv2.resize(enhanced_rgb, (self.stage2_size, self.stage2_size), interpolation=cv2.INTER_LINEAR)
+        # INTER_AREA matches the training-data writer (dataset_cleaner_cli) exactly
+        img_512 = cv2.resize(enhanced_rgb, (self.stage1_size, self.stage1_size), interpolation=cv2.INTER_AREA)
+        img_768 = cv2.resize(enhanced_rgb, (self.stage2_size, self.stage2_size), interpolation=cv2.INTER_AREA)
 
         # Normalize to [0, 1] CHW float32 tensors
         tensor_512 = np.transpose(img_512.astype(np.float32) / 255.0, (2, 0, 1))

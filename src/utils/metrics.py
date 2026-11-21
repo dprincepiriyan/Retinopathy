@@ -7,7 +7,7 @@ Includes:
 - Macro-F1 and ROC-AUC helpers
 """
 
-from typing import Dict
+from typing import Callable, Dict, Optional, Sequence, Tuple
 import numpy as np
 from sklearn.metrics import cohen_kappa_score, f1_score, roc_auc_score, roc_curve
 
@@ -151,7 +151,15 @@ def compute_clinical_metrics(
     except ValueError:
         ref_auc = 0.0
 
+    per_grade_recall = {}
+    for k in range(5):
+        mask_k = y_true_arr == k
+        per_grade_recall[f"recall_grade_{k}"] = (
+            round(float(np.mean(y_pred_arr[mask_k] == k)), 4) if np.any(mask_k) else 0.0
+        )
+
     return {
+        **per_grade_recall,
         "qwk": round(qwk, 4),
         "macro_f1": round(macro_f1, 4),
         "accuracy": round(accuracy, 4),
@@ -160,3 +168,78 @@ def compute_clinical_metrics(
         "referable_auc": round(ref_auc, 4),
         "referable_sensitivity_at_85spec": round(ref_stats["sensitivity"], 4),
     }
+
+
+def bootstrap_ci(
+    metric_fn: Callable[..., float],
+    *arrays: np.ndarray,
+    n_boot: int = 1000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> Tuple[float, float, float]:
+    """Percentile bootstrap CI for any metric over paired sample arrays.
+
+    Returns (point_estimate, lower, upper).
+    """
+    arrs = [np.asarray(a) for a in arrays]
+    n = len(arrs[0])
+    point = float(metric_fn(*arrs))
+    if n == 0:
+        return point, point, point
+    rng = np.random.default_rng(seed)
+    stats = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        try:
+            stats.append(float(metric_fn(*[a[idx] for a in arrs])))
+        except ValueError:
+            continue
+    if not stats:
+        return point, point, point
+    lo, hi = np.quantile(stats, [alpha / 2.0, 1.0 - alpha / 2.0])
+    return point, float(lo), float(hi)
+
+
+def multilabel_triage_metrics(
+    probs: np.ndarray,
+    targets: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    sources: Optional[Sequence[str]] = None,
+    class_names: Sequence[str] = ("dr", "glaucoma", "cataract"),
+) -> Dict[str, float]:
+    """Masked per-class ROC-AUC / F1 for Stage-1, plus *within-source* DR AUC.
+
+    The within-source DR AUC is the honest number: it can only be computed for
+    sources containing both DR-positive and DR-negative scans, so it cannot be
+    inflated by the model recognising which dataset an image came from.
+    """
+    probs = np.asarray(probs, dtype=np.float64)
+    targets = np.asarray(targets, dtype=np.float64)
+    mask = np.ones_like(targets) if mask is None else np.asarray(mask, dtype=np.float64)
+
+    out: Dict[str, float] = {}
+    aucs = []
+    for c, name in enumerate(class_names):
+        valid = mask[:, c] > 0
+        y, p = targets[valid, c], probs[valid, c]
+        if valid.sum() > 0 and len(np.unique(y)) > 1:
+            auc = float(roc_auc_score(y, p))
+            aucs.append(auc)
+            out[f"auc_{name}"] = round(auc, 4)
+            out[f"f1_{name}"] = round(float(f1_score(y, p >= 0.5, zero_division=0)), 4)
+        else:
+            out[f"auc_{name}"] = float("nan")
+    out["macro_auc"] = round(float(np.mean(aucs)), 4) if aucs else float("nan")
+
+    if sources is not None:
+        src_arr = np.asarray(sources)
+        within = []
+        for src in sorted(set(src_arr.tolist())):
+            sel = (src_arr == src) & (mask[:, 0] > 0)
+            y = targets[sel, 0]
+            if sel.sum() > 0 and len(np.unique(y)) > 1:
+                auc = float(roc_auc_score(y, probs[sel, 0]))
+                out[f"auc_dr_within_{src}"] = round(auc, 4)
+                within.append(auc)
+        out["auc_dr_within_source_mean"] = round(float(np.mean(within)), 4) if within else float("nan")
+    return out

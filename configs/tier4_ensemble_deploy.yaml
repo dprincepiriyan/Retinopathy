@@ -2,7 +2,7 @@
 tier4_ensemble:
   tta:
     enabled: true
-    views: 8                         # 8-view Dihedral group (rotations 0/90/180/270 x horizontal flip)
+    views: 1                         # RetinaNetProPipeline(tta_views=...) 1..8 D4 views; fold ensemble already gives 4 members
 
   qwk_threshold_optimizer:
     method: "Nelder-Mead"
@@ -19,7 +19,7 @@ tier4_ensemble:
 
   conformal_prediction:
     alpha: 0.05                      # 95% marginal coverage guarantee (1 - alpha = 0.95)
-    score_type: "aps"                # Adaptive Prediction Sets / cumulative softmax mass
+    score_type: "lac"                # 1 - p(true class) on temperature-scaled probs (src/training/calibration.py)
     max_acceptable_set_size: 2       # Sets of size >= 3 trigger Low Confidence / Human Review
 
   stacking_meta:

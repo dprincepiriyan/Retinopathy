@@ -13,6 +13,7 @@ from src.tier2_triage.glaucoma_onh_branch import (
 from src.tier2_triage.multi_label_triage import (
     MultiLabelTriageEnsemble,
     Stage1TriageOutput,
+    fuse_stage1_outputs,
 )
 from src.tier2_triage.strong_cnn import SqueezeExcitationBlock, StrongCNN
 
@@ -27,4 +28,5 @@ __all__ = [
     "compute_vcdr_and_isnt_metrics",
     "Stage1TriageOutput",
     "MultiLabelTriageEnsemble",
+    "fuse_stage1_outputs",
 ]

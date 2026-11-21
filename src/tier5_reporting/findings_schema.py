@@ -43,7 +43,8 @@ class EyeClinicalFindings(BaseModel):
     prob_dr: float = Field(ge=0.0, le=1.0)
     prob_glaucoma: float = Field(ge=0.0, le=1.0)
     prob_cataract: float = Field(ge=0.0, le=1.0)
-    onh_biomarkers: ONHBiomarkerSummary
+    # None when no trained ONH disc/cup segmentation model is available (never fabricated).
+    onh_biomarkers: Optional[ONHBiomarkerSummary] = None
 
     # Stage-2 DR Severity Grading & Conformal Safety
     raw_primary_dr_grade: int = Field(ge=-1, le=4)

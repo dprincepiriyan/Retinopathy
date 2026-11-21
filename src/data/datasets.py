@@ -8,7 +8,7 @@ Addresses Bottleneck 7 from the forensic paper audit:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 from sklearn.model_selection import StratifiedGroupKFold
@@ -201,8 +201,20 @@ def group_bilateral_pairs(
     return list(by_patient.values())
 
 
+STAGE1_LABEL_MASK_COLUMNS = ("mask_dr", "mask_glaucoma", "mask_cataract")
+
+
 class PreprocessedManifestDataset:
-    """PyTorch-compatible dataset reading preprocessed 512/768 scans from CSV manifests."""
+    """PyTorch-compatible dataset reading preprocessed 512/768 scans from CSV manifests.
+
+    `augment` may be False (no augmentation), True (default `RetinalTrainAugment`)
+    or any callable mapping a uint8 RGB array to an augmented uint8 RGB array.
+
+    Optional manifest columns `mask_dr`, `mask_glaucoma`, `mask_cataract` (0/1) mark
+    which Stage-1 labels are actually known for a row; they are returned as
+    `multi_label_mask` so the loss can ignore unknown labels instead of treating
+    them as negatives.
+    """
 
     def __init__(
         self,
@@ -212,7 +224,7 @@ class PreprocessedManifestDataset:
         only_fold: Optional[int] = None,
         resolution: int = 512,
         data_root_override: Optional[str] = None,
-        augment: bool = False,
+        augment: Union[bool, Callable[[np.ndarray], np.ndarray]] = False,
     ) -> None:
         import csv
         from pathlib import Path
@@ -220,7 +232,15 @@ class PreprocessedManifestDataset:
         self.manifest_dir = Path(manifest_csv).resolve().parent
         self.resolution = resolution
         self.data_root_override = Path(data_root_override) if data_root_override else None
-        self.augment = augment
+        if augment is True:
+            from src.data.augmentations import RetinalTrainAugment
+
+            self.augment_fn: Optional[Callable[[np.ndarray], np.ndarray]] = RetinalTrainAugment("medium")
+        elif callable(augment):
+            self.augment_fn = augment
+        else:
+            self.augment_fn = None
+        self.augment = self.augment_fn is not None
         self.rows: List[Dict[str, str]] = []
 
         with open(manifest_csv, "r", encoding="utf-8") as f:
@@ -237,6 +257,10 @@ class PreprocessedManifestDataset:
 
     def __len__(self) -> int:
         return len(self.rows)
+
+    def dr_grades(self) -> np.ndarray:
+        """Integer DR grades of all rows (used for class-balanced sampling)."""
+        return np.array([int(r.get("dr_grade", 0)) for r in self.rows], dtype=np.int64)
 
     def __getitem__(self, idx: int) -> Dict[str, object]:
         from pathlib import Path
@@ -260,16 +284,8 @@ class PreprocessedManifestDataset:
         if rgb.shape[0] != self.resolution or rgb.shape[1] != self.resolution:
             rgb = cv2.resize(rgb, (self.resolution, self.resolution), interpolation=cv2.INTER_LINEAR)
 
-        if self.augment:
-            # Lossless D4 dihedral group transforms preserve <10px microaneurysms without interpolation blur
-            if np.random.rand() < 0.5:
-                rgb = np.fliplr(rgb)
-            if np.random.rand() < 0.5:
-                rgb = np.flipud(rgb)
-            k_rot = int(np.random.randint(0, 4))
-            if k_rot > 0:
-                rgb = np.rot90(rgb, k=k_rot)
-            rgb = np.ascontiguousarray(rgb)
+        if self.augment_fn is not None:
+            rgb = self.augment_fn(rgb)
 
         tensor_chw = torch.from_numpy(np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1)))
         dr_grade = int(row.get("dr_grade", 0))
@@ -280,8 +296,15 @@ class PreprocessedManifestDataset:
             dtype=torch.float32,
         )
 
+        label_mask = torch.tensor(
+            [float(row.get(col, "1") or 1) for col in STAGE1_LABEL_MASK_COLUMNS],
+            dtype=torch.float32,
+        )
+
         return {
             "image": tensor_chw,
+            "multi_label_mask": label_mask,
+            "source_dataset": row.get("source_dataset", ""),
             "dr_grade": torch.tensor(dr_grade, dtype=torch.long),
             "referable_dr": torch.tensor([1.0 if dr_grade >= 2 else 0.0], dtype=torch.float32),
             "multi_label": multi_label,

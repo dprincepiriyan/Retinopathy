@@ -1,6 +1,6 @@
 # RetinaNet-Pro: Project Progress & Engineering Milestone Report
 
-**Last Updated:** November 10, 2026  
+**Last Updated:** November 21, 2026  
 **Repository:** `Retinopathy` (`RetinaNet-Pro`)  
 **Execution Paradigm:** Hybrid Cloud-Train (Google Colab GPU/TPU) & Offline Local Inference (<500ms on Laptop GPU)
 
@@ -16,6 +16,7 @@
 - [x] **Milestone 3 — Automated Verification & Safety Test Suite:** Built and verified 18 unit tests (`tests/`) covering zero patient leakage across folds, `<10px` micro-lesion retention under Fourier Domain Adaptation, differentiable Soft-QWK & Nelder-Mead threshold search, and zero-hallucination clinical reporting.
 - [x] **Milestone 4 — Multi-Dataset Forensic Overlap & Label-Corruption Audit:** Audited 5 raw zip archives (`24,915` total raw files, `~11.3 GB`), uncovering **68.4% cross-archive redundancy** and **2,007 scrambled/corrupted labels** in secondary low-resolution archives (`dataset-2.zip` / `dataset-4.zip`).
 - [x] **Milestone 5 — End-to-End Tier-0 Clinical Preprocessing & Patient-Grouped Splitting:** Executed multi-core circular FOV cropping (`cv2.convexHull` background floor detector), `IQAGatekeeper` quality filtering, Green-Channel + LAB CLAHE enhancement, 64-bit inner-vessel `pHash` deduplication, canonical FDA reference spectrum fitting, and 5-fold `StratifiedGroupKFold` splitting across **`7,545` clean, unique, gradable retinal scans**.
+- [x] **Milestone 5b — Pre-Training Correctness Review & Fixes (Nov 21, 2026):** see Section 7.
 - [ ] **Milestone 6 — Cloud Training on Google Colab (Next Step):** Upload `data/processed/` to Google Drive, run Stage-1 (`01_colab_stage1_training.ipynb`) and Stage-2 (`02_colab_stage2_training.ipynb`) training on Colab GPU/TPU, and export calibrated `.pth`/`.onnx` weights back to `checkpoints/`.
 
 ---
@@ -78,22 +79,41 @@ All authoritative scans from `dataset-1.zip` (`4,217`) and `dataset-3.zip` (`3,6
 
 ## 5. Verification & Unit Test Suite
 
-All **18 unit tests** in `tests/` pass (`pytest tests -q` in `1.91s`):
+All **31 unit tests** in `tests/` pass (`pytest tests -q`):
 - `tests/test_no_patient_leakage.py`: Verifies perceptual hash deduplication, zero `patient_id` overlap across CV folds/test split, bilateral OD/OS worse-eye aggregation, and end-to-end `DatasetCleaningPipeline` execution.
 - `tests/test_microlesion_retention.py`: Verifies Fourier Domain Adaptation (`FDA`) and Residual Attention U-Net CDAE preserve `<10px` microaneurysms without hallucination.
 - `tests/test_ordinal_metrics.py`: Verifies `CORALOrdinalFocalLoss`, differentiable `SoftQWKLoss`, `AsymmetricFocalLoss`, and Nelder-Mead simplex QWK threshold optimization.
 - `tests/test_report_safety.py`: Verifies deterministic clinical report generation, low-confidence abstention safety gates, and HTML/PDF output integrity.
+- `tests/test_training_upgrades.py`: Verifies strict checkpoints, masked Stage-1 loss, source-shortcut manifest & leakage guard, augmentation, AMP stepping, LR schedule, calibration coverage, and an end-to-end pipeline run on trained checkpoints.
 
 ---
 
 ## 6. Next Steps (Google Colab Training Workflow)
 
-1. **Upload Preprocessed Data (`~1.29 GB`) to Google Drive:**
-   - Upload `/home/prince/Retinopathy/data/processed/` to your Google Drive folder.
-2. **Stage-1 Multi-Label Triage Training on Colab (`colab/01_colab_stage1_training.ipynb`):**
-   - Train `MultiLabelTriageEnsemble` (`StrongCNN` + `ConvNeXtV2CoordinateTriage`) on `stage1_triage_splits.csv` (`512x512`).
-3. **Stage-2 Two-Phase Curriculum Training on Colab (`colab/02_colab_stage2_training.ipynb`):**
-   - **Phase A (Epochs 1–15, `512x512`):** Train `ResViTPro` using `CORALOrdinalFocalLoss` + Referable-DR BCE on `tensors_512/`.
-   - **Phase B (Epochs 16–35, `768x768`):** Fine-tune with `GeM` pooling and `SoftQWKLoss` on `tensors_768/`.
-4. **Threshold Optimization, Calibration & Weight Export (`colab/03_colab_export_weights.ipynb`):**
-   - Run Nelder-Mead threshold search and Split Conformal calibration on out-of-fold validation predictions, then download the exported `.pth` checkpoints into local `checkpoints/` for offline inference in `app/dashboard.py`.
+1. **Upload `retinopathy_processed.tar.gz` to Google Drive** (unchanged archive; the combined Stage-1 manifest is built automatically on Colab).
+2. **Notebook 01 — Stage-1 triage:** pretrained EfficientNet-B3, combined manifest, masked ASL loss. Watch `auc_dr_within_source_mean`.
+3. **Notebook 02 — Stage-2 grading, 4-fold CV:** Phase A 512 px (12 epochs) → Phase B 768 px (8 epochs) per fold. Spread folds across sessions with `FOLDS = [1, 2]` / `[3, 4]`; everything resumes from Drive.
+4. **Notebook 03 — Calibration:** thresholds / temperature / conformal from true OOF predictions; test-split report with bootstrap CIs.
+5. Copy `calibration_params.json`, `stage1_multi_label_best.pth` and `stage2_grader_fold*.pth` into `checkpoints/` and run `streamlit run app/dashboard.py`.
+
+---
+
+## 7. Pre-Training Correctness Review (Milestone 5b)
+
+| Issue found | Fix |
+|---|---|
+| Stage-1 DR label fully determined by source (all positives EyePACS, all negatives ODIR) | `src/data/stage1_manifest.py` adds APTOS DR-negative + DR-positive scans; unknown labels masked in `AsymmetricFocalLoss`; within-source DR AUC reported |
+| Tiny from-scratch networks (~0.45M / ~1.4M params) despite configs naming pretrained backbones | `src/models/pretrained.py`: `timm` backbones + GeM + existing heads, lower backbone LR; legacy nets kept for ablation |
+| fp16 autocast on T4 without loss scaling | `GradScaler` in `ColabTPUAccelerator.backward/clip_and_step`; losses computed in fp32 |
+| Untrained CDAE applied to every inference image; untrained ONH U-Net fed glaucoma probability and vCDR | Both only used when a trained checkpoint exists; ONH biomarkers reported as unavailable otherwise |
+| Train/inference resize mismatch (INTER_AREA + JPEG vs INTER_LINEAR) | Inference reproduces INTER_AREA + JPEG q96 |
+| Temperature never applied, QWK thresholds loaded but unused, `strict=False` loading | Self-describing checkpoints loaded with `strict=True`; temperature + thresholds applied in `RetinaNetProPipeline` |
+| Single validation fold used for model selection *and* calibration, mislabelled "OOF" | 4-fold CV with true OOF; calibration splits OOF (temperature vs conformal); test-split report |
+| Sampler + focal alpha + threshold weights (triple imbalance correction) | Exactly one strategy (`imbalance.strategy`) |
+| Soft-QWK on batch 8 | Gradient accumulation (effective batch 32); Soft-QWK only in Phase B, ramped |
+| "Grad-CAM++" without gradients; unsupervised channels labelled MA/HE/EX/CWS | Real gradient Grad-CAM++; regions reported as attention foci unless lesion-supervised |
+| YAML configs not used by training; EMA configured but absent | Configs drive `src/training/*`; EMA, warmup+cosine, seeding, resumable state implemented |
+| D4-only augmentation | `RetinalTrainAugment`: mild colour / gamma / exposure / rotation / scale / blur |
+| Cached preprocessing wrote placeholder IQA score 0.90 | IQA score stored in a sidecar and reused; unknown otherwise |
+
+Test suite: **31 tests** (`pytest tests -q`), including checkpoint strictness, masked loss, manifest leakage, calibration coverage and an end-to-end pipeline run on trained checkpoints.

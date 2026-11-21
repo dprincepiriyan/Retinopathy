@@ -1,16 +1,18 @@
 """End-to-End 6-Tier Clinical Inference Pipeline (`RetinaNetProPipeline`).
 
 Orchestrates:
-- Tier 0: Circular FOV crop, aspect-preserving 1:1 pad, IQA gatekeeper, Ben Graham & Green/LAB CLAHE
-- Tier 1: Fast Fourier Domain Adaptation (FDA) & Residual Attention U-Net CDAE
-- Tier 2: Stage-1 Multi-Label Pathology Triage (DR, Glaucoma, Cataract) + ONH vCDR/ISNT specialist
-- Tier 3: Stage-2 ResViT-Pro DR Severity Grading (evaluates ALL gradable scans)
-- Tier 4: Nelder-Mead QWK thresholds, Split Conformal Prediction, Grad-CAM++ & Cross-Attention Rollout
+- Tier 0: Circular FOV crop, aspect-preserving 1:1 pad, IQA gatekeeper, Green/LAB CLAHE
+         (identical to the training-data writer, incl. INTER_AREA resize + JPEG q96 round-trip)
+- Tier 1: FDA harmonisation (ONH ROI only); Residual CDAE only if a trained checkpoint exists
+- Tier 2: Stage-1 multi-label triage (DR, glaucoma, cataract) + ONH vCDR/ISNT (trained ONH model only)
+- Tier 3: Stage-2 DR grading - ensemble of all CV-fold checkpoints (optional D4 TTA)
+- Tier 4: Temperature scaling, QWK thresholds, split-conformal sets, real Grad-CAM++
 - Tier 5: Bilateral worse-eye aggregation, deterministic template engine & PDF generation
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+import cv2
 import numpy as np
 import torch
 
@@ -18,9 +20,8 @@ from src.data.preprocessing import Tier0Preprocessor
 from src.explainability.attention_rollout import CrossAttentionRollout
 from src.explainability.gradcam_pp import GradCAMPlusPlus
 from src.tier1_purifiers.fda import FourierDomainAdapter
-from src.tier1_purifiers.residual_cdae import ResidualAttentionUNetCDAE
-from src.tier2_triage.glaucoma_onh_branch import crop_optic_nerve_head_roi
-from src.tier2_triage.multi_label_triage import MultiLabelTriageEnsemble
+from src.tier2_triage.glaucoma_onh_branch import compute_vcdr_and_isnt_metrics, crop_optic_nerve_head_roi
+from src.tier2_triage.multi_label_triage import MultiLabelTriageEnsemble, fuse_stage1_outputs
 from src.tier3_grading.resvit_pro import ResViTPro
 from src.tier4_ensemble.conformal_predictor import SplitConformalPredictor
 from src.tier4_ensemble.qwk_threshold_optimizer import NelderMeadQWKOptimizer
@@ -47,15 +48,34 @@ class EyeVisualArtifacts:
 
 
 class RetinaNetProPipeline:
-    """Unified 6-Tier local edge inference pipeline (<500ms on laptop GPU or CPU)."""
+    """Unified local inference pipeline.
+
+    Safety rules enforced here:
+    - Checkpoints are self-describing and loaded with `strict=True`.
+    - Optional modules (Tier-1 CDAE denoiser, ONH disc/cup U-Net) are only used when a
+      *trained* checkpoint exists; untrained networks never touch patient images.
+    - Probabilities are temperature-scaled before conformal sets are built, exactly as
+      during calibration, and the primary grade uses the QWK-optimised thresholds.
+    """
+
+    STAGE1_CKPT = "stage1_multi_label_best.pth"
+    STAGE2_FOLD_GLOB = "stage2_grader_fold*.pth"
+    STAGE2_LEGACY_CKPT = "stage2_resvit_pro_768_best.pth"
+    ONH_CKPT = "stage1_onh_unet_best.pth"
+    CDAE_CKPT = "tier1_residual_cdae_best.pth"
+    CALIBRATION_JSON = "calibration_params.json"
 
     def __init__(
         self,
         device: Optional[str] = None,
         checkpoints_dir: Optional[str] = None,
+        tta_views: int = 1,
+        jpeg_roundtrip_quality: Optional[int] = 96,
     ) -> None:
         import json
         from pathlib import Path
+
+        from src.models.factory import load_model_checkpoint
 
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,6 +84,9 @@ class RetinaNetProPipeline:
 
         project_root = Path(__file__).resolve().parents[1]
         ckpt_dir = Path(checkpoints_dir) if checkpoints_dir else (project_root / "checkpoints")
+        self.tta_views = int(np.clip(tta_views, 1, 8))
+        # Training images were stored as JPEG (quality 96); mimic that at inference for parity.
+        self.jpeg_roundtrip_quality = jpeg_roundtrip_quality
 
         self.iqa_gate = IQAGatekeeper()
         self.fda = FourierDomainAdapter()
@@ -74,57 +97,130 @@ class RetinaNetProPipeline:
             except Exception:
                 pass
 
-        self.cdae = ResidualAttentionUNetCDAE(base_channels=16).to(self.device).eval()
+        # Tier-1 CDAE: only if a trained checkpoint exists (random weights would corrupt inputs).
+        self.cdae = None
+        if (ckpt_dir / self.CDAE_CKPT).exists():
+            self.cdae, _, _ = load_model_checkpoint(ckpt_dir / self.CDAE_CKPT, self.device)
 
-        # Auto-detect and load Stage-1 Multi-Label Triage checkpoint if present
-        s1_ckpt_path = ckpt_dir / "stage1_multi_label_best.pth"
-        s1_base_ch = 16
-        s1_state = None
-        if s1_ckpt_path.exists():
-            s1_state = torch.load(str(s1_ckpt_path), map_location=self.device, weights_only=True)
-            if "strong_cnn.stem.0.weight" in s1_state:
-                s1_base_ch = int(s1_state["strong_cnn.stem.0.weight"].shape[0])
-        self.stage1_ensemble = MultiLabelTriageEnsemble(base_channels=s1_base_ch).to(self.device).eval()
-        if s1_state is not None:
-            self.stage1_ensemble.load_state_dict(s1_state, strict=False)
+        # ONH disc/cup U-Net: only if trained; otherwise biomarkers are reported as unavailable.
+        self.onh_unet = None
+        if (ckpt_dir / self.ONH_CKPT).exists():
+            self.onh_unet, _, _ = load_model_checkpoint(ckpt_dir / self.ONH_CKPT, self.device)
 
-        # Auto-detect and load Stage-2 ResViT-Pro checkpoint if present
-        s2_ckpt_path = ckpt_dir / "stage2_resvit_pro_768_best.pth"
-        s2_fpn_dim = 32
-        s2_state = None
-        if s2_ckpt_path.exists():
-            s2_state = torch.load(str(s2_ckpt_path), map_location=self.device, weights_only=True)
-            if "stage_s4.conv.0.weight" in s2_state:
-                s2_fpn_dim = int(s2_state["stage_s4.conv.0.weight"].shape[0])
-        self.stage2_resvit = ResViTPro(fpn_dim=s2_fpn_dim, num_classes=5, num_heads=4).to(self.device).eval()
-        if s2_state is not None:
-            self.stage2_resvit.load_state_dict(s2_state, strict=False)
+        # Stage-1 triage
+        s1_path = ckpt_dir / self.STAGE1_CKPT
+        if s1_path.exists():
+            self.stage1_model, s1_spec, _ = load_model_checkpoint(s1_path, self.device, task_hint="stage1")
+            self.stage1_size = int(s1_spec.get("input_size", 512))
+            self.stage1_trained = True
+        else:
+            self.stage1_model = MultiLabelTriageEnsemble(base_channels=16).to(self.device).eval()
+            self.stage1_size = 256  # untrained demo / unit-test mode
+            self.stage1_trained = False
 
-        # Use 512/768 clinical resolutions when trained checkpoints are loaded, fast 256px for unit tests
-        has_trained_weights = s1_state is not None or s2_state is not None
-        self.preprocessor = Tier0Preprocessor(
-            stage1_size=512 if has_trained_weights else 256,
-            stage2_size=768 if has_trained_weights else 256,
-        )
+        # Stage-2 grading: ensemble of all CV fold models (fallback: legacy single checkpoint).
+        self.stage2_members: List[Tuple[torch.nn.Module, int]] = []
+        fold_paths = sorted(ckpt_dir.glob(self.STAGE2_FOLD_GLOB))
+        if not fold_paths and (ckpt_dir / self.STAGE2_LEGACY_CKPT).exists():
+            fold_paths = [ckpt_dir / self.STAGE2_LEGACY_CKPT]
+        for path in fold_paths:
+            model, spec, _ = load_model_checkpoint(path, self.device, task_hint="stage2")
+            self.stage2_members.append((model, int(spec.get("input_size", 768))))
+        self.stage2_trained = bool(self.stage2_members)
+        if not self.stage2_trained:
+            self.stage2_members.append((ResViTPro(fpn_dim=32, num_classes=5, num_heads=4).to(self.device).eval(), 256))
+        # Backward-compatible attribute names
+        self.stage1_ensemble = self.stage1_model
+        self.stage2_resvit = self.stage2_members[0][0]
 
+        self.preprocessor = Tier0Preprocessor(stage1_size=self.stage1_size, stage2_size=self.stage2_members[0][1])
+
+        # Calibration (thresholds, temperature, conformal q_hat) from notebook 03 / calibration CLI
         self.qwk_optimizer = NelderMeadQWKOptimizer()
         self.conformal = SplitConformalPredictor(alpha=0.05)
-
-        cal_path = ckpt_dir / "calibration_params.json"
+        self.temperature = 1.0
+        self.has_calibration = False
+        cal_path = ckpt_dir / self.CALIBRATION_JSON
         if cal_path.exists():
-            try:
-                with open(cal_path, "r", encoding="utf-8") as f:
-                    cal_data = json.load(f)
-                if "qwk_thresholds" in cal_data:
-                    self.qwk_optimizer.thresholds_ = np.array(cal_data["qwk_thresholds"], dtype=np.float64)
-                if "conformal_q_hat" in cal_data:
-                    self.conformal.q_hat_ = float(cal_data["conformal_q_hat"])
-            except Exception:
-                pass
+            with open(cal_path, "r", encoding="utf-8") as f:
+                cal_data = json.load(f)
+            if "qwk_thresholds" in cal_data:
+                self.qwk_optimizer.thresholds_ = np.array(cal_data["qwk_thresholds"], dtype=np.float64)
+            if "conformal_q_hat" in cal_data:
+                self.conformal.q_hat_ = float(cal_data["conformal_q_hat"])
+            if "conformal_alpha" in cal_data:
+                self.conformal.alpha = float(cal_data["conformal_alpha"])
+            self.temperature = float(cal_data.get("temperature", 1.0))
+            self.has_calibration = True
 
         self.gradcam = GradCAMPlusPlus()
         self.rollout = CrossAttentionRollout()
         self.aggregator = BilateralClinicalAggregator()
+
+    # ------------------------------------------------------------------ helpers
+    def _to_tensor(self, enhanced_rgb: np.ndarray, size: int) -> torch.Tensor:
+        """Resize exactly like the training-data writer (INTER_AREA + JPEG q96) -> (1, 3, H, W)."""
+        img = cv2.resize(enhanced_rgb, (size, size), interpolation=cv2.INTER_AREA)
+        if self.jpeg_roundtrip_quality:
+            ok, buf = cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
+                                   [cv2.IMWRITE_JPEG_QUALITY, int(self.jpeg_roundtrip_quality)])
+            if ok:
+                img = cv2.cvtColor(cv2.imdecode(buf, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        t = torch.from_numpy(np.transpose(img.astype(np.float32) / 255.0, (2, 0, 1))).unsqueeze(0)
+        t = t.to(self.device)
+        if self.cdae is not None:
+            t, _ = self.cdae(t)
+        return t
+
+    @staticmethod
+    def _tta(x: torch.Tensor, view: int) -> torch.Tensor:
+        """D4 view `view` in [0, 8): rotation k = view // 2, horizontal flip if view is odd."""
+        x = torch.rot90(x, k=view // 2, dims=(2, 3))
+        return torch.flip(x, dims=(3,)) if view % 2 else x
+
+    def _apply_temperature(self, probs: np.ndarray) -> np.ndarray:
+        if abs(self.temperature - 1.0) < 1e-9:
+            return probs
+        logits = np.log(np.clip(probs, 1e-8, 1.0)) / max(self.temperature, 1e-3)
+        e = np.exp(logits - logits.max())
+        return e / e.sum()
+
+    def _grade_stage2(self, enhanced_rgb: np.ndarray) -> Dict[str, object]:
+        """Fold-ensemble x TTA Stage-2 prediction for one eye."""
+        class_probs, ref_probs, cont_scores = [], [], []
+        first_out = None
+        for model, size in self.stage2_members:
+            x = self._to_tensor(enhanced_rgb, size)
+            for v in range(self.tta_views):
+                out = model(self._tta(x, v))
+                tri = out["tri_head"]
+                class_probs.append(tri.class_probs[0].float().cpu().numpy())
+                ref_probs.append(float(tri.referable_prob[0, 0].float().cpu().item()))
+                cont_scores.append(float(tri.continuous_score[0, 0].float().cpu().item()))
+                if first_out is None:
+                    first_out = out
+        mean_probs = np.mean(class_probs, axis=0)
+        return {
+            "class_probs": self._apply_temperature(mean_probs / mean_probs.sum()),
+            "referable_prob": float(np.mean(ref_probs)),
+            "continuous_score": float(np.clip(np.mean(cont_scores), 0.0, 4.5)),
+            "ensemble_std": float(np.std(ref_probs)) if len(ref_probs) > 1 else 0.0,
+            "first_out": first_out,
+        }
+
+    def _gradcam_map(self, enhanced_rgb: np.ndarray, output_size: Tuple[int, int]) -> np.ndarray:
+        """Real Grad-CAM++ w.r.t. the predicted continuous severity of the first ensemble member."""
+        model, size = self.stage2_members[0]
+        x = self._to_tensor(enhanced_rgb, size).detach()
+        with torch.enable_grad():
+            model.zero_grad(set_to_none=True)
+            out = model(x)
+            fmap = out["feature_map"]
+            fmap.retain_grad()
+            out["tri_head"].continuous_score.sum().backward()
+            grads = fmap.grad
+        model.zero_grad(set_to_none=True)
+        return self.gradcam.compute_heatmap_from_activations(fmap.detach(), grads, output_size=output_size)
 
     @torch.no_grad()
     def evaluate_eye(
@@ -136,7 +232,8 @@ class RetinaNetProPipeline:
         prep = self.preprocessor(image_rgb)
         iqa_res = self.iqa_gate.evaluate(prep.cropped_rgb, prep.fov_mask)
 
-        # Harmonize via Tier-1 FDA
+        # FDA harmonisation is used for the ONH ROI / display only; the classifiers see exactly
+        # the preprocessing they were trained on (FOV crop + green/LAB CLAHE).
         harmonized_rgb = self.fda.transform(prep.enhanced_rgb, fov_mask=prep.fov_mask)
         onh_roi_rgb, _ = crop_optic_nerve_head_roi(harmonized_rgb, prep.fov_mask, roi_size=128)
 
@@ -150,13 +247,7 @@ class RetinaNetProPipeline:
                 prob_dr=0.0,
                 prob_glaucoma=0.0,
                 prob_cataract=0.0,
-                onh_biomarkers=ONHBiomarkerSummary(
-                    vcdr=0.32,
-                    hcdr=0.32,
-                    area_ratio=0.10,
-                    isnt_rule_violated=False,
-                    glaucoma_biometric_risk_score=0.08,
-                ),
+                onh_biomarkers=None,
                 raw_primary_dr_grade=-1,
                 conservative_dr_grade=-1,
                 displayed_dr_grade=None,
@@ -177,55 +268,57 @@ class RetinaNetProPipeline:
             )
             return findings, artifacts
 
-        # Convert to tensors
-        t_s1 = torch.from_numpy(prep.tensor_512).unsqueeze(0).to(self.device)
-        t_s2 = torch.from_numpy(prep.tensor_768).unsqueeze(0).to(self.device)
-        t_onh = (
-            torch.from_numpy(np.transpose(onh_roi_rgb.astype(np.float32) / 255.0, (2, 0, 1)))
-            .unsqueeze(0)
-            .to(self.device)
+        # Tier 2: Stage-1 triage (+ ONH biomarkers only from a trained ONH model)
+        onh_bio = None
+        if self.onh_unet is not None:
+            t_onh = (
+                torch.from_numpy(np.transpose(onh_roi_rgb.astype(np.float32) / 255.0, (2, 0, 1)))
+                .unsqueeze(0)
+                .to(self.device)
+            )
+            seg = self.onh_unet(t_onh)[0].cpu().numpy()
+            onh_bio = compute_vcdr_and_isnt_metrics(disc_mask=seg[0], cup_mask=seg[1], laterality=laterality)
+        s1_out = fuse_stage1_outputs(
+            self.stage1_model(self._to_tensor(prep.enhanced_rgb, self.stage1_size)), onh_bio
         )
 
-        # Tier 1 CDAE residual denoising
-        t_s1_clean, _ = self.cdae(t_s1)
-        t_s2_clean, _ = self.cdae(t_s2)
+        # Tier 3: Stage-2 grading on ALL gradable scans (fold ensemble x TTA)
+        s2 = self._grade_stage2(prep.enhanced_rgb)
+        class_probs = s2["class_probs"]
+        cont_score = s2["continuous_score"]
+        primary = int(self.qwk_optimizer.predict(np.array([cont_score]))[0]) if self.has_calibration else None
 
-        # Tier 2 Stage-1 Multi-Label Triage + Glaucoma ONH Specialist
-        s1_out = self.stage1_ensemble.predict_eye(
-            tensor_512=t_s1_clean, onh_roi_tensor=t_onh, laterality=laterality
-        )
-
-        # Tier 3 Stage-2 ResViT-Pro Fine-Grained DR Grading (Runs on ALL gradable scans)
-        s2_out = self.stage2_resvit(t_s2_clean)
-        tri_head = s2_out["tri_head"]
-        class_probs = tri_head.class_probs[0].cpu().numpy()
-        ref_prob = float(tri_head.referable_prob[0, 0].cpu().item())
-        cont_score = float(np.clip(tri_head.continuous_score[0, 0].cpu().item(), 0.0, 4.5))
-
-        # Tier 4 Conformal Prediction & Dual Explainability
+        # Tier 4: conformal set on temperature-scaled probabilities
         conformal_res = self.conformal.predict_single(
             class_probs=class_probs,
-            ensemble_std=0.05,
+            ensemble_std=s2["ensemble_std"],
             is_iqa_gradable=True,
+            primary_grade=primary,
         )
 
-        fpn_s4 = s2_out["fpn_stride4"]
-        lesion_maps = s2_out["lesion_maps"][0].cpu().numpy()
-        attn_weights = s2_out["cross_attention_weights"]
-
+        # Explainability: real Grad-CAM++ (gradients of the continuous severity score)
         h_orig, w_orig = prep.cropped_rgb.shape[:2]
-        gradcam_map = self.gradcam.compute_heatmap_from_activations(
-            fpn_s4, output_size=(h_orig, w_orig)
-        )
-        gradcam_overlay = self.gradcam.overlay_heatmap_on_rgb(
-            prep.cropped_rgb, gradcam_map, fov_mask=prep.fov_mask
-        )
+        gradcam_map = self._gradcam_map(prep.enhanced_rgb, (h_orig, w_orig))
+        gradcam_overlay = self.gradcam.overlay_heatmap_on_rgb(prep.cropped_rgb, gradcam_map, fov_mask=prep.fov_mask)
+        first_out = s2["first_out"]
+        stage2_model = self.stage2_members[0][0]
+        lesion_maps = first_out.get("lesion_maps")
         lesion_cands = self.gradcam.extract_microlesion_coordinates(
-            gradcam_map, lesion_prob_maps=lesion_maps, fov_mask=prep.fov_mask
+            gradcam_map,
+            lesion_prob_maps=lesion_maps[0].cpu().numpy() if lesion_maps is not None else None,
+            fov_mask=prep.fov_mask,
+            lesion_maps_supervised=bool(getattr(stage2_model, "lesion_maps_supervised", False)),
         )
-        quad_inv = self.rollout.compute_quadrant_involvement(
-            attn_weights, laterality=laterality, output_size=(h_orig, w_orig)
-        )
+        attn_weights = first_out.get("cross_attention_weights")
+        if attn_weights is not None:
+            quad_inv = self.rollout.compute_quadrant_involvement(
+                attn_weights, laterality=laterality, output_size=(h_orig, w_orig)
+            )
+        else:
+            small = cv2.resize(gradcam_map, (16, 16), interpolation=cv2.INTER_AREA)
+            quad_inv = self.rollout.compute_quadrant_involvement_from_map(
+                small, laterality=laterality, output_size=(h_orig, w_orig)
+            )
 
         findings = EyeClinicalFindings(
             laterality=laterality,
@@ -235,18 +328,22 @@ class RetinaNetProPipeline:
             prob_dr=s1_out.prob_dr,
             prob_glaucoma=s1_out.prob_glaucoma,
             prob_cataract=s1_out.prob_cataract,
-            onh_biomarkers=ONHBiomarkerSummary(
-                vcdr=s1_out.onh_biomarkers.vcdr,
-                hcdr=s1_out.onh_biomarkers.hcdr,
-                area_ratio=s1_out.onh_biomarkers.area_ratio,
-                isnt_rule_violated=s1_out.onh_biomarkers.isnt_rule_violated,
-                glaucoma_biometric_risk_score=s1_out.onh_biomarkers.glaucoma_biometric_risk_score,
+            onh_biomarkers=(
+                ONHBiomarkerSummary(
+                    vcdr=onh_bio.vcdr,
+                    hcdr=onh_bio.hcdr,
+                    area_ratio=onh_bio.area_ratio,
+                    isnt_rule_violated=onh_bio.isnt_rule_violated,
+                    glaucoma_biometric_risk_score=onh_bio.glaucoma_biometric_risk_score,
+                )
+                if onh_bio is not None
+                else None
             ),
             raw_primary_dr_grade=conformal_res.primary_grade,
             conservative_dr_grade=conformal_res.conservative_referral_grade,
             displayed_dr_grade=None if conformal_res.abstain_flag else conformal_res.conservative_referral_grade,
             continuous_severity_score=round(cont_score, 3),
-            prob_referable_dr=round(ref_prob, 4),
+            prob_referable_dr=round(float(np.clip(s2["referable_prob"], 0.0, 1.0)), 4),
             class_probabilities=[round(float(p), 4) for p in class_probs],
             conformal_prediction_set=conformal_res.prediction_set,
             confidence_tier=conformal_res.confidence_tier,

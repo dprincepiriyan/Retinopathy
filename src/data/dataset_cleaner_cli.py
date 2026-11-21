@@ -298,6 +298,28 @@ class DatasetCleaningPipeline:
         return summary, splits
 
 
+def _iqa_sidecar_path(path_512: str) -> Path:
+    return Path(path_512).with_suffix(".iqa.json")
+
+
+def _write_iqa_sidecar(path_512: str, quality_score: float) -> None:
+    """Persist the real IQA score next to the cached image so re-runs don't invent one."""
+    try:
+        with open(_iqa_sidecar_path(path_512), "w", encoding="utf-8") as f:
+            json.dump({"quality_score": float(quality_score)}, f)
+    except OSError:
+        pass
+
+
+def _read_iqa_sidecar(path_512: str) -> Tuple[str, str]:
+    """Return (quality_score, reason) for a cached image; empty score if never recorded."""
+    try:
+        with open(_iqa_sidecar_path(path_512), "r", encoding="utf-8") as f:
+            return str(round(float(json.load(f)["quality_score"]), 4)), "Passed Tier-0 IQA (cached)"
+    except (OSError, ValueError, KeyError):
+        return "", "Passed Tier-0 IQA earlier (cached; score not recorded)"
+
+
 def _process_zip_batch_worker(args: Tuple[str, List[Dict[str, Any]], str, str, bool]) -> List[Dict[str, Any]]:
     """Multiprocessing worker that streams a batch of entries from a single zip archive."""
     zip_path, items, out_512_dir, out_768_dir, save_768 = args
@@ -325,6 +347,7 @@ def _process_zip_batch_worker(args: Tuple[str, List[Dict[str, Any]], str, str, b
                 if cached_bgr is not None:
                     cached_rgb = cv2.cvtColor(cached_bgr, cv2.COLOR_BGR2RGB)
                     phash_val = compute_perceptual_hash(cached_rgb)
+                    cached_q, cached_reason = _read_iqa_sidecar(path_512)
                     results.append(
                         {
                             "status": "GRADABLE_KEPT",
@@ -337,8 +360,8 @@ def _process_zip_batch_worker(args: Tuple[str, List[Dict[str, Any]], str, str, b
                             "source_dataset": source_dataset,
                             "stage_role": stage_role,
                             "phash": phash_val,
-                            "quality_score": 0.90,
-                            "reasons": "Passed Tier-0 IQA (cached)",
+                            "quality_score": cached_q,
+                            "reasons": cached_reason,
                             "path_512": path_512,
                             "path_768": path_768,
                         }
@@ -398,6 +421,7 @@ def _process_zip_batch_worker(args: Tuple[str, List[Dict[str, Any]], str, str, b
             phash_val = compute_perceptual_hash(img_512)
             bgr_512 = cv2.cvtColor(img_512, cv2.COLOR_RGB2BGR)
             cv2.imwrite(path_512, bgr_512, [cv2.IMWRITE_JPEG_QUALITY, 96])
+            _write_iqa_sidecar(path_512, iqa.quality_score)
 
             if save_768 and out_768_dir:
                 img_768 = cv2.resize(enhanced_rgb, (768, 768), interpolation=cv2.INTER_AREA)

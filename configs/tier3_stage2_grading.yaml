@@ -1,56 +1,70 @@
-# Tier 3: Stage-2 Fine-Grained DR Severity Grading (All Gradable Scans)
+# Tier 3: Stage-2 Fine-Grained DR Severity Grading (ICDR 0-4)
+# This file is READ by src/training/stage2.py (notebook 02 and `python -m src.training.cli stage2`).
 stage2_grading:
-  evaluate_all_gradable_scans: true  # Eliminates Stage-1 cascade false negatives
   num_classes: 5
-  class_names:
-    0: "No DR"
-    1: "Mild NPDR"
-    2: "Moderate NPDR"
-    3: "Severe NPDR"
-    4: "Proliferative DR"
-  referable_grade_cutoff: 2          # Grade >= 2 is clinically referable DR
+  class_names: {0: "No DR", 1: "Mild NPDR", 2: "Moderate NPDR", 3: "Severe NPDR", 4: "Proliferative DR"}
+  referable_grade_cutoff: 2
 
-  resvit_pro:
-    cnn_backbone: "resnet50d"
-    vit_backbone: "swinv2_tiny_window16_256"
-    fpn_channels: 256
-    preserve_stride4_features: true  # Sensitive to <10px microaneurysms
-    cross_attention_heads: 8
-    cross_attention_dim: 256
+  data:
+    manifest: "stage2_grading_splits.csv"
+    augmentation: "medium"
+
+  model:
+    arch: "timm"                     # timm (recommended) | resvit_pro (from-scratch ablation)
+    backbone_name: "efficientnet_b3"
+    pretrained: true
     dropout: 0.3
+    drop_path_rate: 0.2
+    gem_p: 3.0
+    # For arch: resvit_pro use instead: {fpn_dim: 64, num_heads: 4, gem_p: 3.0, dropout: 0.25}
 
-  lesion_guided_net:
-    enabled: true
-    lesion_channels: 4               # [MA, HE, EX, CWS]
-    aux_loss_weight: 0.30
+  cv:
+    folds: [1, 2, 3, 4]              # one model per validation fold -> true OOF predictions + 4-model ensemble
 
-  gem_pooling:
-    initial_p: 3.0                   # Learnable p-norm prevents tiny microaneurysms from washing out
-    learnable: true
-    eps: 1.0e-6
+  imbalance:
+    # Exactly ONE correction is applied:
+    #   sampler      -> effective-number WeightedRandomSampler, unweighted CORAL loss
+    #   loss_weights -> plain shuffling, per-threshold CORAL weights from class prevalence
+    #   none         -> neither
+    strategy: "sampler"
+    effective_number_beta: 0.999
 
-  tri_head:
-    ordinal_type: "CORAL"            # 4 binary cumulative thresholds (y > 0, y > 1, y > 2, y > 3)
-    use_referable_binary_head: true  # Explicit P(Grade >= 2)
-    use_continuous_regressor: true   # Scalar s in [0, 4.5] for Nelder-Mead QWK optimization
-    loss_weights:
-      ordinal_focal: 1.0
-      soft_qwk: 0.75
-      referable_bce: 0.50
-      continuous_smooth_l1: 0.40
+  loss:
+    coral_focal_gamma: 1.0
+    weights:
+      ordinal: 1.0
+      referable_bce: 0.5
+      continuous_smooth_l1: 0.4
+    # Soft-QWK weight is set per phase below (it is noisy on small batches).
 
-  curriculum_training:
-    phase_a:
+  training:
+    seed: 42
+    weight_decay: 1.0e-2
+    backbone_lr_mult: 0.2
+    min_lr_ratio: 0.02
+    grad_clip: 2.0
+    ema_decay: 0.999
+    num_workers: 2
+    select_metric: "qwk"             # or qwk_continuous_default_thr / referable_auc
+
+  curriculum:
+    - name: "phase_a_512"
       resolution: 512
-      epochs: 15
-      batch_size: 24
-      lr: 2.0e-4
-      freeze_stride4_fpn: false
-      soft_qwk_ramp: 0.3
-    phase_b:
+      epochs: 12
+      batch_size: 16
+      grad_accum_steps: 2            # effective batch 32
+      lr: 3.0e-4
+      warmup_epochs: 1
+      soft_qwk_start: 0.0
+      soft_qwk_end: 0.0
+      train_gem_p: false
+    - name: "phase_b_768"
       resolution: 768
-      epochs: 20
-      batch_size: 12
-      lr: 5.0e-5
-      enable_gem_learning: true
-      soft_qwk_ramp: 1.0
+      epochs: 8
+      batch_size: 8
+      grad_accum_steps: 4            # effective batch 32
+      lr: 8.0e-5
+      warmup_epochs: 0.5
+      soft_qwk_start: 0.1
+      soft_qwk_end: 0.3
+      train_gem_p: true

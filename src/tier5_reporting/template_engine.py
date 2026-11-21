@@ -95,16 +95,18 @@ class DeterministicClinicalTemplateEngine:
     @staticmethod
     def build_other_pathologies_note(eye: EyeClinicalFindings) -> str:
         """Build the deterministic 1-line 'Note on Other Pathologies' from Stage-1 outputs."""
-        vcdr = eye.onh_biomarkers.vcdr
-        isnt_violated = eye.onh_biomarkers.isnt_rule_violated
-
-        if eye.prob_glaucoma >= 0.45 or vcdr >= 0.55:
-            rim_note = "ISNT neuroretinal rim rule violated" if isnt_violated else "borderline rim thinning"
-            glaucoma_clause = (
-                f"Elevated glaucoma suspicion (vCDR: {vcdr:.2f}, P={eye.prob_glaucoma:.2f}, {rim_note})"
-            )
+        if eye.onh_biomarkers is None:
+            if eye.prob_glaucoma >= 0.45:
+                glaucoma_clause = (
+                    f"Elevated glaucoma suspicion (P={eye.prob_glaucoma:.2f}; ONH cup-to-disc "
+                    "measurement unavailable)"
+                )
+            else:
+                glaucoma_clause = (
+                    f"Low glaucoma suspicion (P={eye.prob_glaucoma:.2f}; ONH cup-to-disc measurement unavailable)"
+                )
         else:
-            glaucoma_clause = f"Optic Cup-to-Disc ratio is normal (vCDR: {vcdr:.2f}, low glaucoma suspicion)"
+            glaucoma_clause = TemplateEngineHelpers.glaucoma_clause_with_onh(eye)
 
         if eye.prob_cataract >= 0.50:
             cataract_clause = f"media opacification detected suggestive of cataract (P={eye.prob_cataract:.2f})."
@@ -146,7 +148,8 @@ class DeterministicClinicalTemplateEngine:
             f"(Continuous Severity: {eye.continuous_severity_score:.2f}/4.50, "
             f"Referable DR Prob: {eye.prob_referable_dr * 100:.1f}%, "
             f"95% Conformal Set: {{{set_str}}}, Confidence: {eye.confidence_tier}). "
-            f"Localized {lesion_count} focal lesion candidate(s), predominantly in the {eye.dominant_quadrant} quadrant."
+            f"Model attention concentrated on {lesion_count} focal region(s), predominantly in the "
+            f"{eye.dominant_quadrant} quadrant (saliency map, not a validated lesion count)."
         )
         return eye
 
@@ -166,3 +169,19 @@ class DeterministicClinicalTemplateEngine:
         if extra_context:
             ctx.update(extra_context)
         return template.render(**ctx)
+
+
+class TemplateEngineHelpers:
+    """Small deterministic sentence builders shared by the template engine."""
+
+    @staticmethod
+    def glaucoma_clause_with_onh(eye: EyeClinicalFindings) -> str:
+        vcdr = eye.onh_biomarkers.vcdr
+        if eye.prob_glaucoma >= 0.45 or vcdr >= 0.55:
+            rim_note = (
+                "ISNT neuroretinal rim rule violated"
+                if eye.onh_biomarkers.isnt_rule_violated
+                else "borderline rim thinning"
+            )
+            return f"Elevated glaucoma suspicion (vCDR: {vcdr:.2f}, P={eye.prob_glaucoma:.2f}, {rim_note})"
+        return f"Optic Cup-to-Disc ratio is normal (vCDR: {vcdr:.2f}, low glaucoma suspicion)"
