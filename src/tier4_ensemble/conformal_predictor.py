@@ -27,7 +27,12 @@ class ConformalPredictionResult:
 
 
 class SplitConformalPredictor:
-    """Split Conformal Prediction using Adaptive Prediction Sets (APS) & ordinal adjacency."""
+    """Split Conformal Prediction with the LAC score s = 1 - p(y_true) & ordinal adjacency rules.
+
+    Calibrate `q_hat_` with `fit()` on probabilities produced *exactly* as at inference
+    (i.e. after temperature scaling); otherwise the coverage guarantee does not hold.
+    The extra "add the runner-up grade" rule only enlarges sets, so coverage can only increase.
+    """
 
     def __init__(
         self,
@@ -65,11 +70,13 @@ class SplitConformalPredictor:
         class_probs: np.ndarray,
         ensemble_std: float = 0.05,
         is_iqa_gradable: bool = True,
+        primary_grade: int | None = None,
     ) -> ConformalPredictionResult:
         """Construct the conformal prediction set and safety-gated confidence rating for one eye."""
         probs = np.asarray(class_probs, dtype=np.float64).ravel()
         probs = probs / max(np.sum(probs), 1e-8)
-        primary_grade = int(np.argmax(probs))
+        # Primary grade: QWK-optimised threshold on the continuous score when provided, else argmax.
+        primary_grade = int(np.argmax(probs)) if primary_grade is None else int(primary_grade)
 
         if not is_iqa_gradable:
             return ConformalPredictionResult(
@@ -85,8 +92,8 @@ class SplitConformalPredictor:
         # Include all classes whose non-conformity score (1 - p_k) <= q_hat_
         threshold_prob = 1.0 - self.q_hat_
         included = [int(k) for k, p in enumerate(probs) if p >= threshold_prob]
-        if not included:
-            included = [primary_grade]
+        if primary_grade not in included:
+            included.append(primary_grade)
 
         # Also include second best class if its probability is close to top class (borderline ordinal grade)
         sorted_indices = np.argsort(probs)[::-1]
@@ -105,7 +112,7 @@ class SplitConformalPredictor:
             confidence_tier = "LOW_ABSTAIN"
             abstain_flag = True
             conservative_grade = max(included)
-        elif len(included) == 1 and ensemble_std <= self.max_high_conf_std and probs[primary_grade] >= 0.65:
+        elif len(set(included)) == 1 and ensemble_std <= self.max_high_conf_std and probs[primary_grade] >= 0.65:
             confidence_tier = "HIGH"
             abstain_flag = False
             conservative_grade = primary_grade

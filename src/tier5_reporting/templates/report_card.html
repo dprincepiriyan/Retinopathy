@@ -79,7 +79,11 @@
           </div>
           <div class="metric-row">
             <span><strong>ONH Biometrics (vCDR / ISNT):</strong></span>
+            {% if eye.onh_biomarkers %}
             <span>vCDR: {{ "%.2f"|format(eye.onh_biomarkers.vcdr) }} | ISNT Violated: {{ "Yes" if eye.onh_biomarkers.isnt_rule_violated else "No" }}</span>
+            {% else %}
+            <span>Not available (ONH segmentation model not trained)</span>
+            {% endif %}
           </div>
           <div class="metric-row">
             <span><strong>Dominant Quadrant (4-2-1 Rule):</strong></span>

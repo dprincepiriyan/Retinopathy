@@ -109,6 +109,8 @@ class ClinicalPDFGenerator:
                     )
                     lines.append(
                         f"  ONH Biomarker: vCDR={eye.onh_biomarkers.vcdr:.2f}, ISNT Violated={eye.onh_biomarkers.isnt_rule_violated}"
+                        if eye.onh_biomarkers
+                        else "  ONH Biomarker: not available (ONH segmentation model not trained)"
                     )
                     lines.append(f"  {eye.other_pathologies_note}")
                 lines.append("-" * 72)

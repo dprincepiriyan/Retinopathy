@@ -35,6 +35,7 @@ class SoftQWKLoss(nn.Module):
             targets: Integer class labels of shape (B,) in {0..K-1}.
             is_probs: Whether `probs_or_logits` is already normalized probabilities.
         """
+        probs_or_logits = probs_or_logits.float()  # numerically safe under fp16/bf16 autocast
         probs = probs_or_logits if is_probs else F.softmax(probs_or_logits, dim=-1)
         probs = probs.clamp(min=self.eps, max=1.0)
         batch_size = float(probs.shape[0])

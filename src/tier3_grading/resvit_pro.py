@@ -97,7 +97,15 @@ class ResBlockFPN(nn.Module):
 
 
 class ResViTPro(nn.Module):
-    """Upgraded ResViT-Pro architecture for fine-grained 5-class DR severity grading."""
+    """Upgraded ResViT-Pro architecture for fine-grained 5-class DR severity grading.
+
+    NOTE: this is a small (~0.45M parameter) network trained from scratch. Keep it for
+    ablations; `src.models.PretrainedOrdinalGrader` is the recommended default.
+    The lesion branch is *unsupervised* unless trained with lesion masks, so its
+    channels must not be presented as MA/HE/EX/CWS detections.
+    """
+
+    lesion_maps_supervised = False
 
     def __init__(
         self,
@@ -197,6 +205,7 @@ class ResViTPro(nn.Module):
 
         return {
             "tri_head": tri_out,
+            "feature_map": lesion_gated_s4,
             "fpn_stride4": lesion_gated_s4,
             "lesion_maps": lesion_prob_maps,
             "cross_attention_weights": attn_weights,

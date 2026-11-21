@@ -41,6 +41,14 @@ def main() -> None:
     )
 
     pipeline = get_pipeline()
+    if not (pipeline.stage1_trained and pipeline.stage2_trained):
+        st.error(
+            "DEMO MODE — no trained checkpoints found in `checkpoints/`. Grades and probabilities below come "
+            "from untrained networks and are meaningless. Train with the Colab notebooks and copy "
+            "`stage1_multi_label_best.pth`, `stage2_grader_fold*.pth` and `calibration_params.json` into `checkpoints/`."
+        )
+    elif not pipeline.has_calibration:
+        st.warning("No `calibration_params.json` found: temperature, QWK thresholds and conformal sets are uncalibrated.")
     template_engine = DeterministicClinicalTemplateEngine()
     pdf_generator = ClinicalPDFGenerator(template_engine)
 
@@ -158,19 +166,23 @@ def main() -> None:
                 continue
 
             vis = visuals[lat]
-            img_tabs = st.tabs(["Enhanced CLAHE + FDA", "Grad-CAM++ Micro-Lesions", "ONH Glaucoma ROI"])
+            img_tabs = st.tabs(["Enhanced CLAHE", "Grad-CAM++ Saliency", "ONH Glaucoma ROI"])
             with img_tabs[0]:
                 st.image(vis.enhanced_rgb, caption=f"{lat} Tier-0/1 Preprocessed Scan", use_container_width=True)
             with img_tabs[1]:
                 st.image(
                     vis.gradcam_overlay_rgb,
-                    caption=f"{lat} Stride-4 Grad-CAM++ Overlay ({len(findings.lesion_candidates)} focal candidates)",
+                    caption=f"{lat} Grad-CAM++ overlay ({len(findings.lesion_candidates)} high-attention regions)",
                     use_container_width=True,
                 )
             with img_tabs[2]:
                 st.image(
                     vis.onh_roi_rgb,
-                    caption=f"{lat} Optic Nerve Head ROI (vCDR: {findings.onh_biomarkers.vcdr:.2f})",
+                    caption=(
+                        f"{lat} Optic Nerve Head ROI (vCDR: {findings.onh_biomarkers.vcdr:.2f})"
+                        if findings.onh_biomarkers
+                        else f"{lat} Optic Nerve Head ROI (vCDR unavailable: ONH model not trained)"
+                    ),
                     width=220,
                 )
 
@@ -181,9 +193,13 @@ def main() -> None:
                 f"- **Referable DR (Grade ≥ 2) Probability:** `{findings.prob_referable_dr * 100:.1f}%`\n"
                 f"- **Stage-1 Multi-Label Triage:** DR `{findings.prob_dr:.2f}` | "
                 f"Glaucoma `{findings.prob_glaucoma:.2f}` | Cataract `{findings.prob_cataract:.2f}`\n"
-                f"- **ONH Biometrics:** vCDR `{findings.onh_biomarkers.vcdr:.2f}`, "
-                f"ISNT Violated: `{findings.onh_biomarkers.isnt_rule_violated}`\n"
-                f"- **Narrative:** {findings.eye_narrative_summary}"
+                + (
+                    f"- **ONH Biometrics:** vCDR `{findings.onh_biomarkers.vcdr:.2f}`, "
+                    f"ISNT Violated: `{findings.onh_biomarkers.isnt_rule_violated}`\n"
+                    if findings.onh_biomarkers
+                    else "- **ONH Biometrics:** not available (ONH segmentation model not trained)\n"
+                )
+                + f"- **Narrative:** {findings.eye_narrative_summary}"
             )
 
     st.divider()

@@ -60,17 +60,32 @@ class CrossAttentionRollout:
             token_importance = token_importance[: grid_side * grid_side]
 
         grid_2d = token_importance.reshape(grid_side, grid_side)
+        return self.compute_quadrant_involvement_from_map(grid_2d, laterality=laterality, output_size=output_size)
+
+    def compute_quadrant_involvement_from_map(
+        self,
+        spatial_map: np.ndarray,
+        laterality: str = "OD",
+        output_size: tuple[int, int] = (512, 512),
+    ) -> QuadrantInvolvement:
+        """Quadrant involvement from any 2D saliency map (e.g. a Grad-CAM++ heatmap).
+
+        Used for backbones without cross-attention weights.
+        """
+        grid_2d = np.asarray(spatial_map, dtype=np.float32)
+        grid_side = grid_2d.shape[0]
         g_min, g_max = float(np.min(grid_2d)), float(np.max(grid_2d))
         if g_max - g_min > 1e-7:
             grid_norm = (grid_2d - g_min) / (g_max - g_min)
         else:
             grid_norm = np.ones_like(grid_2d) * 0.25
 
-        mid = max(1, grid_side // 2)
-        top_left = float(np.mean(grid_norm[:mid, :mid]))
-        top_right = float(np.mean(grid_norm[:mid, mid:]))
-        bot_left = float(np.mean(grid_norm[mid:, :mid]))
-        bot_right = float(np.mean(grid_norm[mid:, mid:]))
+        mid_r = max(1, grid_side // 2)
+        mid_c = max(1, grid_norm.shape[1] // 2)
+        top_left = float(np.mean(grid_norm[:mid_r, :mid_c]))
+        top_right = float(np.mean(grid_norm[:mid_r, mid_c:]))
+        bot_left = float(np.mean(grid_norm[mid_r:, :mid_c]))
+        bot_right = float(np.mean(grid_norm[mid_r:, mid_c:]))
 
         total = max(top_left + top_right + bot_left + bot_right, 1e-6)
         top_left /= total

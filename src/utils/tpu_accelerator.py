@@ -1,5 +1,11 @@
 """Google Colab TPU (`torch_xla`) & Local GPU/CPU Hardware Accelerator Abstraction.
 
+IMPORTANT: Colab T4 GPUs have no bfloat16 support, so CUDA autocast falls back to
+float16. float16 training REQUIRES loss scaling, otherwise small gradients underflow
+to zero. `backward()` / `clip_and_step()` below apply a `torch.amp.GradScaler`
+automatically whenever float16 autocast is active. GPU runtimes (T4/L4/A100) are
+recommended over TPU for this project (dynamic resolutions + small batches).
+
 Optimizes RetinaNet-Pro training specifically for Google Colab TPUs (v2-8 / v5e-1):
 1. Native `bfloat16` mixed precision on TPU (avoids FP16 GradScaler XLA graph breaks).
 2. Enforces static batch/spatial dimensions (`drop_last=True`) to prevent expensive
@@ -30,9 +36,17 @@ class AcceleratorInfo:
 class ColabTPUAccelerator:
     """Unified hardware accelerator supporting Google Colab TPU (`torch_xla`), CUDA, and CPU."""
 
-    def __init__(self, prefer_tpu: bool = True) -> None:
+    def __init__(self, prefer_tpu: bool = False) -> None:
         self._xm: Any = None
         self.info = self._detect_hardware(prefer_tpu=prefer_tpu)
+        self.grad_scaler = None
+        if self.uses_grad_scaler:
+            self.grad_scaler = torch.amp.GradScaler("cuda")
+
+    @property
+    def uses_grad_scaler(self) -> bool:
+        """float16 autocast on CUDA needs dynamic loss scaling."""
+        return self.info.backend == "cuda" and self.info.amp_dtype == torch.float16
 
     def _detect_hardware(self, prefer_tpu: bool = True) -> AcceleratorInfo:
         if prefer_tpu:
@@ -83,6 +97,36 @@ class ColabTPUAccelerator:
         if self.info.backend == "cuda":
             return torch.autocast("cuda", dtype=self.info.amp_dtype)
         return nullcontext()
+
+    def backward(self, loss: torch.Tensor) -> None:
+        """Backward pass with loss scaling when float16 autocast is active."""
+        if self.grad_scaler is not None:
+            self.grad_scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+    def clip_and_step(
+        self,
+        optimizer: torch.optim.Optimizer,
+        parameters,
+        max_norm: float | None = None,
+    ) -> bool:
+        """Unscale (if needed), clip gradients, step the optimizer and update the scaler.
+
+        Returns False when the step was skipped because of inf/NaN gradients (fp16 overflow).
+        """
+        if self.grad_scaler is not None:
+            self.grad_scaler.unscale_(optimizer)
+            if max_norm is not None:
+                torch.nn.utils.clip_grad_norm_(parameters, max_norm=max_norm)
+            scale_before = self.grad_scaler.get_scale()
+            self.grad_scaler.step(optimizer)
+            self.grad_scaler.update()
+            return self.grad_scaler.get_scale() >= scale_before
+        if max_norm is not None:
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=max_norm)
+        self.optimizer_step(optimizer)
+        return True
 
     def optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
         """Execute optimizer step and synchronize XLA graph on TPU."""

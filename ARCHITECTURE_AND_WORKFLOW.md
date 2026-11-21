@@ -1,4 +1,11 @@
 # Deep Research Analysis, Multi-Algorithm System Architecture & End-to-End Workflow
+
+> **Implementation note (Nov 2026):** this document is the design blueprint. What is actually trained by default is
+> an ImageNet-pretrained `timm` backbone + GeM + the Tier-3 tri-head (Stage 2) and a pretrained multi-label head
+> (Stage 1), with 4-fold CV and OOF-based calibration — see `README.md` → *Training & Evaluation Workflow* and
+> `PROJECT_PROGRESS.md` §7. ResViT-Pro, the CDAE, the ONH U-Net and the lesion branch are implemented but need
+> their own labelled data / training before they are used for patient outputs.
+
 **Reference Paper:** *A Hybrid Multi-Stage Deep Learning Framework for Automated Retinal Disease Screening and Diabetic Retinopathy Severity Classification* (Buvanagirish SK et al., Chennai Institute of Technology)
 
 > [!NOTE]

@@ -102,8 +102,15 @@ class GradCAMPlusPlus:
         heatmap_01: np.ndarray,
         lesion_prob_maps: np.ndarray | None = None,
         fov_mask: np.ndarray | None = None,
+        lesion_maps_supervised: bool = False,
     ) -> List[MicroLesionCandidate]:
-        """Extract top-K focal micro-lesion coordinates from high-res activation maps."""
+        """Extract top-K high-attention focal regions from a saliency map.
+
+        Regions are only given lesion-type names (MA/HE/EX/CWS) when
+        `lesion_maps_supervised=True`, i.e. the lesion branch was trained on lesion
+        masks. Otherwise they are reported generically as attention foci: naming
+        them from an unsupervised channel or from blob size would be fabricated.
+        """
         h, w = heatmap_01.shape[:2]
         work_map = heatmap_01.copy()
         if fov_mask is not None:
@@ -127,8 +134,13 @@ class GradCAMPlusPlus:
             ix, iy = int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))
             score = float(work_map[iy, ix])
 
-            l_type = "Microaneurysm (MA)" if radius <= 8 else "Hemorrhage / Exudate Focus"
-            if lesion_prob_maps is not None and lesion_prob_maps.ndim == 3 and lesion_prob_maps.shape[0] == 4:
+            l_type = "Model attention focus (lesion type not classified)"
+            if (
+                lesion_maps_supervised
+                and lesion_prob_maps is not None
+                and lesion_prob_maps.ndim == 3
+                and lesion_prob_maps.shape[0] == 4
+            ):
                 lh, lw = lesion_prob_maps.shape[1:]
                 ly = int(np.clip(iy * lh / h, 0, lh - 1))
                 lx = int(np.clip(ix * lw / w, 0, lw - 1))

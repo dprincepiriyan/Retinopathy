@@ -1,48 +1,51 @@
-# Tier 2: Stage-1 Multi-Label Disease Triage & Glaucoma ONH Specialist
+# Tier 2: Stage-1 Multi-Label Disease Triage
+# This file is READ by src/training/stage1.py (notebook 01 and `python -m src.training.cli stage1`).
 stage1_triage:
-  task_type: "multi_label_binary"    # Independent Sigmoids (never mutually exclusive Softmax)
-  classes:
-    - "diabetic_retinopathy"
-    - "glaucoma"
-    - "cataract"
-  input_resolution: 512
+  task_type: "multi_label_binary"    # Independent sigmoids (never mutually exclusive softmax)
+  classes: ["diabetic_retinopathy", "glaucoma", "cataract"]
 
-  models:
-    strong_cnn:
-      backbone: "efficientnet_b0"
-      pretrained: true
-      se_reduction: 16
-      dropout: 0.3
-    convnext_v2:
-      backbone: "convnextv2_tiny"
-      pretrained: true
-      use_coordinate_attention: true
-      coord_attn_reduction: 32
-      dropout: 0.3
-    retfound_lora:
-      backbone: "vit_base_patch16_224"
-      lora_rank: 16
-      lora_alpha: 32
-      lora_dropout: 0.1
+  data:
+    # Combined manifest adds APTOS (DR-negative AND DR-positive from one source) so the
+    # DR label is no longer predictable from the dataset/camera alone (EyePACS vs ODIR).
+    use_combined_manifest: true
+    include_aptos: true
+    resolution: 512
+    val_fold: 4                      # Fold 0 is the locked test split
+    augmentation: "medium"           # d4_only | light | medium | strong
 
-  glaucoma_onh_specialist:
-    roi_size: 256
-    unet_base_channels: 32
-    vcdr_suspicion_threshold: 0.55   # Vertical Cup-to-Disc Ratio >= 0.55 flags glaucoma risk
-    vcdr_high_risk_threshold: 0.65
-    check_isnt_rule: true            # Inferior >= Superior >= Nasal >= Temporal rim thickness
+  model:
+    arch: "timm"                     # timm (recommended) | legacy_ensemble (from-scratch ablation)
+    backbone_name: "efficientnet_b3" # any timm CNN, e.g. convnext_tiny, efficientnet_b2, resnet50d
+    pretrained: true
+    dropout: 0.3
+    drop_path_rate: 0.1
 
   loss:
-    name: "AsymmetricFocalLoss"
+    name: "AsymmetricFocalLoss"      # unknown labels (mask_* = 0) are excluded from the loss
     gamma_neg: 4.0
     gamma_pos: 1.0
     clip: 0.05
-    label_smoothing: 0.02
+    label_smoothing: 0.0
 
   training:
-    batch_size: 32
-    epochs: 25
-    learning_rate: 3.0e-4
+    seed: 42
+    epochs: 15
+    batch_size: 16
+    grad_accum_steps: 1
+    lr: 3.0e-4                       # head LR; backbone uses lr * backbone_lr_mult
+    backbone_lr_mult: 0.2
     weight_decay: 1.0e-2
-    ema_decay: 0.999
-    mixed_precision: "fp16"
+    warmup_epochs: 1
+    min_lr_ratio: 0.01
+    grad_clip: 2.0
+    ema_decay: 0.999                 # set to null to disable EMA
+    num_workers: 2
+    select_metric: "macro_auc"       # or auc_dr_within_source_mean
+
+  # ONH disc/cup U-Net needs REFUGE / ORIGA / Drishti-GS masks to be trained.
+  # Until checkpoints/stage1_onh_unet_best.pth exists, vCDR is reported as unavailable.
+  glaucoma_onh_specialist:
+    roi_size: 256
+    unet_base_channels: 32
+    vcdr_suspicion_threshold: 0.55
+    vcdr_high_risk_threshold: 0.65

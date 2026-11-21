@@ -69,6 +69,7 @@ class CORALOrdinalFocalLoss(nn.Module):
             ordinal_logits: Tensor of shape (B, K-1).
             labels: Integer tensor of shape (B,) in {0..K-1}.
         """
+        ordinal_logits = ordinal_logits.float()  # numerically safe under fp16/bf16 autocast
         targets = encode_ordinal_targets(labels, num_classes=self.num_classes)
         probs = torch.sigmoid(ordinal_logits)
         bce = F.binary_cross_entropy_with_logits(ordinal_logits, targets, reduction="none")

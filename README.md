@@ -27,6 +27,7 @@ The system operates across a **6-Tier Modular Pipeline (Tiers 0–5)**:
 
 4. **Tier 3: Stage-2 Fine-Grained DR Severity Grading**
    - Evaluates **all gradable eye scans** (eliminating cascade false-negatives from Stage 1).
+   - **Default model:** ImageNet-pretrained `timm` backbone + GeM + Tri-Head (see Training section). ResViT-Pro below is kept as a compact from-scratch ablation.
    - **ResViT-Pro:** Multi-scale FPN CNN stream (stride-4 feature maps sensitive to <10px microaneurysms) coupled with SwinV2/ViT global transformer stream via Bidirectional Cross-Attention.
    - **Generalized Mean (GeM) Pooling:** Learnable $-norm pooling preventing tiny focal microaneurysms from being washed out.
    - **Tri-Head Diagnostic Layer:** CORAL/CORN ordinal logits (Grades 0–4), binary referable DR head (Grade $\ge$ 2), and continuous severity regressor.
@@ -44,10 +45,39 @@ The system operates across a **6-Tier Modular Pipeline (Tiers 0–5)**:
 
 ---
 
-## ⚡ Execution Strategy: Hybrid Cloud-Train & Local-Infer
+## ⚡ Training & Evaluation Workflow
 
-- **Training:** Executed on **Google Colab GPUs (L4 / A100 / T4)** using mixed-precision FP16, EMA, and PyTorch Lightning checkpoints.
-- **Inference & Demo:** Lightweight exported weights (.pth / .onnx ~80MB total) run entirely locally on laptop GPUs (<1.8 GB VRAM footprint).
+All training logic lives in `src/training/` and is driven by the YAML configs; the Colab notebooks are thin drivers.
+
+| Step | Notebook / CLI | Config | Output (mirrored to Drive) |
+|---|---|---|---|
+| Stage-1 triage | `colab/01_…` or `python -m src.training.cli stage1` | `configs/tier2_stage1_triage.yaml` | `stage1_multi_label_best.pth`, `stage1_metrics.json` |
+| Stage-2 grading (4-fold CV) | `colab/02_…` or `python -m src.training.cli stage2 [--folds 1 2]` | `configs/tier3_stage2_grading.yaml` | `stage2_grader_fold{1..4}.pth`, `stage2_oof.npz`, `stage2_test_ensemble.npz`, `stage2_cv_metrics.json` |
+| Calibration | `colab/03_…` or `python -m src.training.cli calibrate` | – | `calibration_params.json` (thresholds, temperature, conformal `q_hat`, test report) |
+
+Key properties:
+
+- **ImageNet-pretrained `timm` backbones** (default EfficientNet-B3) with GeM pooling and the task heads; the from-scratch `ResViTPro` / StrongCNN+ConvNeXt ensemble remain available as `arch: resvit_pro` / `arch: legacy_ensemble` for ablations.
+- **Stage-1 source-shortcut fix:** in the original Stage-1 data every DR-positive image is EyePACS and every negative is ODIR. Training uses `stage1_triage_combined_splits.csv` (built automatically), which adds APTOS DR-negative and DR-positive scans and masks unknown labels. Report `auc_dr_within_source_mean`, not just `auc_dr`.
+- **True out-of-fold predictions:** one Stage-2 model per validation fold (1–4); fold 0 is the locked test split, evaluated once per model. The four fold models are ensembled at inference.
+- **Correct mixed precision:** fp16 on T4 uses a `GradScaler`; bf16 where supported.
+- **Resumable:** every epoch writes a full training state (model, optimizer, EMA, scaler); finished folds are skipped, so CV can span several Colab sessions.
+- **Calibration without double-dipping:** thresholds on all OOF, temperature on OOF half A, conformal on OOF half B, and everything reported on the test split with bootstrap CIs.
+- **Inference parity & safety:** inference resizes exactly like the training-data writer, checkpoints load with `strict=True`, untrained modules (CDAE denoiser, ONH disc/cup U-Net) are never applied, temperature + thresholds are used at inference, and Grad-CAM++ uses real gradients. Saliency regions are not labelled as specific lesions unless a lesion-supervised model is used.
+
+Quick local smoke run (CPU, tiny):
+
+```bash
+python -m src.training.cli stage1 --out /tmp/smoke --set model.backbone_name=efficientnet_b0 model.pretrained=false \
+    data.resolution=128 data.max_train_samples=64 data.max_eval_samples=48 training.epochs=1 training.num_workers=0
+pytest tests -q
+```
+
+### Known limitations / next steps
+
+- Stage-2 is trained on APTOS-2019 only (single source, ~3.4k images). Add EyePACS / DDR / Messidor-2 and keep **Messidor-2 or IDRiD as an external test set** never used for training.
+- Stage-1 DR labels still partially correlate with source (EyePACS positives only); the within-source AUC is the trustworthy number.
+- The ONH disc/cup U-Net, the CDAE denoiser and the lesion branch need their own labelled data (REFUGE/ORIGA, IDRiD/DDR lesion masks) before they are used clinically.
 
 ---
 

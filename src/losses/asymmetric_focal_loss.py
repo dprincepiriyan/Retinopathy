@@ -27,13 +27,21 @@ class AsymmetricFocalLoss(nn.Module):
         self.label_smoothing = label_smoothing
         self.eps = eps
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute multi-label Asymmetric Focal Loss.
 
         Args:
             logits: Raw unnormalized logits of shape (B, C).
             targets: Binary multi-label targets in {0, 1} of shape (B, C).
+            mask: Optional (B, C) 0/1 tensor; 0 marks an *unknown* label that must
+                not contribute to the loss (instead of being treated as negative).
         """
+        logits = logits.float()
         targets_float = targets.to(dtype=logits.dtype)
         if self.label_smoothing > 0:
             targets_float = targets_float * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
@@ -56,4 +64,7 @@ class AsymmetricFocalLoss(nn.Module):
             one_sided_w = torch.pow(1.0 - pt, one_sided_gamma)
             loss = loss * one_sided_w
 
+        if mask is not None:
+            mask_f = mask.to(dtype=loss.dtype)
+            return -(loss * mask_f).sum() / mask_f.sum().clamp(min=1.0)
         return -loss.mean()
