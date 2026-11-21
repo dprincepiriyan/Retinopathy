@@ -85,3 +85,11 @@ pytest tests -q
 
 For the full forensic paper audit, mathematical formulas, and phase-by-phase implementation details, refer to:
 👉 **[ARCHITECTURE_AND_WORKFLOW.md](./ARCHITECTURE_AND_WORKFLOW.md)**
+
+---
+
+## ⚖️ License & Disclaimer
+
+- **Code:** released under the [MIT License](./LICENSE).
+- **Datasets & trained weights:** the MIT license covers only the source code in this repository. The fundus image datasets (APTOS 2019, EyePACS, ODIR-5K and others) are **not** redistributed here and remain subject to their original licenses / terms of use. Model weights trained on them should be treated as subject to those same terms (several permit non-commercial research use only).
+- **Not a medical device:** this is a research and educational project. It has not been clinically validated or approved by any regulatory body and must not be used to diagnose, treat or make referral decisions for real patients.
