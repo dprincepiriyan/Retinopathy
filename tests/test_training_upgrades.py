@@ -202,3 +202,20 @@ def test_pipeline_uses_trained_checkpoints_and_calibration(tmp_path) -> None:
     report, _ = pipe.evaluate_bilateral_patient("P-1", od_image_rgb=img)
     assert "unavailable" in report.od_findings.other_pathologies_note
     assert ClinicalPDFGenerator().generate_pdf_bytes(report)[:4] == b"%PDF"
+
+
+def test_t4_uses_fp16_with_grad_scaler_not_emulated_bf16(monkeypatch) -> None:
+    from src.utils import tpu_accelerator as ta
+
+    monkeypatch.setattr(ta.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(ta.torch.cuda, "is_bf16_supported", lambda *a, **k: True)  # emulation reports True
+    monkeypatch.setattr(ta.torch.cuda, "get_device_name", lambda *a: "Tesla T4")
+    monkeypatch.setattr(ta.torch.amp, "GradScaler", lambda *a, **k: object())
+
+    monkeypatch.setattr(ta.torch.cuda, "get_device_capability", lambda *a: (7, 5))  # T4
+    t4 = ta.ColabTPUAccelerator(prefer_tpu=False)
+    assert t4.info.amp_dtype == torch.float16 and t4.grad_scaler is not None
+
+    monkeypatch.setattr(ta.torch.cuda, "get_device_capability", lambda *a: (8, 9))  # L4
+    l4 = ta.ColabTPUAccelerator(prefer_tpu=False)
+    assert l4.info.amp_dtype == torch.bfloat16 and l4.grad_scaler is None

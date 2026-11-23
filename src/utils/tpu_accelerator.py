@@ -33,6 +33,18 @@ class AcceleratorInfo:
     device_name: str
 
 
+def cuda_has_native_bf16() -> bool:
+    """True only for GPUs with *native* bfloat16 (Ampere / compute capability >= 8.0).
+
+    `torch.cuda.is_bf16_supported()` also returns True on T4 / V100 because bf16 can be
+    emulated there, but emulated bf16 is far slower than native fp16 + GradScaler.
+    """
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    return major >= 8
+
+
 class ColabTPUAccelerator:
     """Unified hardware accelerator supporting Google Colab TPU (`torch_xla`), CUDA, and CPU."""
 
@@ -67,7 +79,7 @@ class ColabTPUAccelerator:
 
         if torch.cuda.is_available():
             dev = torch.device("cuda")
-            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            amp_dtype = torch.bfloat16 if cuda_has_native_bf16() else torch.float16
             return AcceleratorInfo(
                 backend="cuda",
                 device=dev,
