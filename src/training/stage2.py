@@ -32,6 +32,8 @@ from src.models.factory import build_model, load_model_checkpoint, save_model_ch
 from src.models.pretrained import parameter_groups
 from src.training.common import (
     ModelEMA,
+    NonFiniteGuard,
+    model_is_finite,
     balanced_sampler,
     load_training_state,
     make_loader,
@@ -95,8 +97,14 @@ def predict_stage2(model, loader, accel: ColabTPUAccelerator) -> Dict[str, np.nd
         ref.append(tri.referable_prob.float().squeeze(1).cpu().numpy())
         ys.append(batch["dr_grade"].numpy())
         ids.extend(batch["image_id"])
+    probs_arr = np.concatenate(probs)
+    if not np.isfinite(probs_arr).all():
+        raise RuntimeError(
+            f"Model produced NaN/inf for {int((~np.isfinite(probs_arr)).any(1).sum())} images "
+            f"(weights finite: {model_is_finite(model)}). Retry with the override 'training.amp=false'."
+        )
     return {
-        "probs": np.concatenate(probs),
+        "probs": probs_arr,
         "continuous_scores": np.concatenate(cont),
         "referable_probs": np.concatenate(ref),
         "targets": np.concatenate(ys),
@@ -142,6 +150,8 @@ def train_stage2_fold(
         lr=float(phases[0]["lr"]),
     )
     ema = ModelEMA(model, decay=float(tcfg["ema_decay"])) if tcfg.get("ema_decay") else None
+    accel.set_amp(bool(tcfg.get("amp", True)))
+    guard = NonFiniteGuard(model)
     qwk_fn = SoftQWKLoss(num_classes=5)
     lw = cfg.get("loss", {}).get("weights", {})
     strategy = cfg.get("imbalance", {}).get("strategy", "sampler")
@@ -158,6 +168,10 @@ def train_stage2_fold(
         if accel.grad_scaler is not None and state.get("scaler"):
             accel.grad_scaler.load_state_dict(state["scaler"])
         start_epoch, best_score, history = state["epoch"] + 1, state["best_score"], state["history"]
+        if not model_is_finite(model) or (ema and not model_is_finite(ema.module)):
+            raise RuntimeError(
+                f"{last_path} contains NaN/inf weights or BatchNorm stats. Delete it (locally and on Drive) to restart."
+            )
         print(f"[stage2 fold {val_fold}] resumed from epoch {state['epoch']} (best {select_metric} {best_score:.4f})")
 
     pin, nw = accel.info.backend == "cuda", int(tcfg.get("num_workers", 2))
@@ -215,9 +229,13 @@ def train_stage2_fold(
                 x = batch["image"].to(accel.device, non_blocking=True)
                 y = batch["dr_grade"].to(accel.device)
                 y_ref = batch["referable_dr"].to(accel.device)
+                guard.before_forward()
                 with accel.autocast_context(enabled=True):
                     tri = model(x)["tri_head"]
                 loss = _stage2_loss(tri, y, y_ref, coral_fn, qwk_fn, lw, qwk_w) / accum
+                if not guard.check(loss):
+                    optimizer.zero_grad(set_to_none=True)  # drop this (and any partially accumulated) batch
+                    continue
                 accel.backward(loss)
                 if (i + 1) % accum == 0:
                     if not accel.clip_and_step(optimizer, trainable_parameters(model), tcfg.get("grad_clip", 2.0)):
@@ -228,6 +246,7 @@ def train_stage2_fold(
                 running += float(loss.item()) * accum
                 n_b += 1
 
+            skipped_bad = guard.end_epoch(f"[stage2 fold {val_fold}] epoch {epoch}")
             eval_model = ema.module if ema else model
             val_pred = predict_stage2(eval_model, val_loader, accel)
             vm = stage2_metrics(val_pred)
@@ -260,6 +279,7 @@ def train_stage2_fold(
                 f"QWK(cont)={vm['qwk_continuous_default_thr']:.4f} F1={vm['macro_f1']:.4f} "
                 f"mildRecall={vm['mild_dr_recall']:.3f} refAUC={vm['referable_auc']:.4f}"
                 + (f" skipped_steps={skipped}" if skipped else "")
+                + (f" nonfinite_batches={skipped_bad}" if skipped_bad else "")
                 + (" *saved*" if improved else "")
             )
 

@@ -219,3 +219,34 @@ def test_t4_uses_fp16_with_grad_scaler_not_emulated_bf16(monkeypatch) -> None:
     monkeypatch.setattr(ta.torch.cuda, "get_device_capability", lambda *a: (8, 9))  # L4
     l4 = ta.ColabTPUAccelerator(prefer_tpu=False)
     assert l4.info.amp_dtype == torch.bfloat16 and l4.grad_scaler is None
+
+
+def test_nonfinite_guard_protects_batchnorm_stats_from_fp16_overflow() -> None:
+    from src.training.common import NonFiniteGuard, model_is_finite
+
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Conv2d(3, 4, 3), torch.nn.BatchNorm2d(4), torch.nn.Flatten(),
+                                torch.nn.LazyLinear(1)).train()
+    model(torch.rand(2, 3, 8, 8))  # materialise lazy layer
+    guard = NonFiniteGuard(model, max_bad_fraction=0.6)
+    before = model[1].running_var.clone()
+
+    guard.before_forward()
+    out = model(torch.full((2, 3, 8, 8), float("inf")))  # like an fp16 overflow: inf/NaN activations + BN stats
+    assert not guard.check(out.sum())
+    assert torch.equal(model[1].running_var, before) and model_is_finite(model)
+
+    guard.before_forward()
+    assert guard.check(model(torch.rand(2, 3, 8, 8)).sum())
+    assert guard.end_epoch("t") == 1
+    guard.bad, guard.total = 5, 6
+    with pytest.raises(RuntimeError, match="training.amp=false"):
+        guard.end_epoch("t")
+
+
+def test_amp_can_be_disabled() -> None:
+    accel = ColabTPUAccelerator(prefer_tpu=False)
+    accel.set_amp(False)
+    assert accel.grad_scaler is None and not accel.uses_grad_scaler
+    with accel.autocast_context(enabled=True):
+        assert torch.ones(1).dtype == torch.float32

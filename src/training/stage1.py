@@ -21,6 +21,8 @@ from src.models.factory import build_model, save_model_checkpoint
 from src.models.pretrained import parameter_groups
 from src.training.common import (
     ModelEMA,
+    NonFiniteGuard,
+    model_is_finite,
     load_training_state,
     make_loader,
     maybe_subsample,
@@ -67,6 +69,11 @@ def evaluate_stage1(model, loader, criterion, accel: ColabTPUAccelerator) -> Dic
         ids.extend(batch["image_id"])
 
     probs_arr = np.concatenate(probs)
+    if not np.isfinite(probs_arr).all():
+        raise RuntimeError(
+            f"Model produced NaN/inf for {int((~np.isfinite(probs_arr)).any(1).sum())} evaluation images "
+            f"(weights finite: {model_is_finite(model)}). Retry with the override 'training.amp=false'."
+        )
     targets_arr = np.concatenate(targets)
     masks_arr = np.concatenate(masks)
     metrics = multilabel_triage_metrics(probs_arr, targets_arr, masks_arr, sources)
@@ -134,6 +141,8 @@ def train_stage1(
         lr=float(tcfg["lr"]),
     )
     ema = ModelEMA(model, decay=float(tcfg["ema_decay"])) if tcfg.get("ema_decay") else None
+    accel.set_amp(bool(tcfg.get("amp", True)))
+    guard = NonFiniteGuard(model)
 
     epochs = int(tcfg["epochs"])
     accum = int(tcfg.get("grad_accum_steps", 1))
@@ -157,6 +166,10 @@ def train_stage1(
         if accel.grad_scaler is not None and state.get("scaler"):
             accel.grad_scaler.load_state_dict(state["scaler"])
         start_epoch, best_score, history = state["epoch"] + 1, state["best_score"], state["history"]
+        if not model_is_finite(model) or (ema and not model_is_finite(ema.module)):
+            raise RuntimeError(
+                f"{last_path} contains NaN/inf weights or BatchNorm stats. Delete it (locally and on Drive) to restart."
+            )
         print(f"[stage1] resumed from epoch {state['epoch']} (best macro-AUC {best_score:.4f})")
 
     best_path = out_dir / BEST_CKPT_NAME
@@ -172,9 +185,13 @@ def train_stage1(
             x = batch["image"].to(accel.device, non_blocking=True)
             y = batch["multi_label"].to(accel.device)
             m = batch["multi_label_mask"].to(accel.device)
+            guard.before_forward()
             with accel.autocast_context(enabled=True):
                 out = model(x)
             loss = _stage1_loss(criterion, out, y, m) / accum
+            if not guard.check(loss):
+                optimizer.zero_grad(set_to_none=True)  # drop this (and any partially accumulated) batch
+                continue
             accel.backward(loss)
             if (i + 1) % accum == 0:
                 if not accel.clip_and_step(optimizer, trainable_parameters(model), tcfg.get("grad_clip", 2.0)):
@@ -185,6 +202,7 @@ def train_stage1(
             running += float(loss.item()) * accum
             n_batches += 1
 
+        skipped_bad = guard.end_epoch(f"[stage1] epoch {epoch}")
         eval_model = ema.module if ema else model
         val = evaluate_stage1(eval_model, val_loader, criterion, accel)
         vm = val["metrics"]
@@ -220,6 +238,7 @@ def train_stage1(
             f"DR(within-source)={vm.get('auc_dr_within_source_mean', float('nan')):.3f} "
             f"GL={vm.get('auc_glaucoma', float('nan')):.3f} CAT={vm.get('auc_cataract', float('nan')):.3f}"
             + (f" skipped_steps={skipped}" if skipped else "")
+            + (f" nonfinite_batches={skipped_bad}" if skipped_bad else "")
             + (" *saved*" if improved else "")
         )
 

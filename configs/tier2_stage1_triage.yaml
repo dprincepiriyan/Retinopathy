@@ -29,6 +29,7 @@ stage1_triage:
 
   training:
     seed: 42
+    amp: true                        # mixed precision; set false (fp32) if NaN/inf errors persist
     epochs: 15
     batch_size: 16
     grad_accum_steps: 1

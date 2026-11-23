@@ -39,6 +39,7 @@ stage2_grading:
 
   training:
     seed: 42
+    amp: true                        # mixed precision; set false (fp32) if NaN/inf errors persist
     weight_decay: 1.0e-2
     backbone_lr_mult: 0.2
     min_lr_ratio: 0.02

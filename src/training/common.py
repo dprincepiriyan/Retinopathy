@@ -187,3 +187,57 @@ def maybe_subsample(dataset, max_samples: Optional[int], seed: int):
         keep = np.sort(rng.choice(len(dataset.rows), size=int(max_samples), replace=False))
         dataset.rows = [dataset.rows[i] for i in keep]
     return dataset
+
+
+# --------------------------------------------------------------------------- fp16 safety
+def model_is_finite(model: nn.Module) -> bool:
+    """True if every parameter and floating buffer (incl. BatchNorm running stats) is finite."""
+    tensors = [p.detach() for p in model.parameters()]
+    tensors += [b for b in model.buffers() if b.dtype.is_floating_point]
+    return bool(torch.stack([torch.isfinite(t).all() for t in tensors]).all())
+
+
+class NonFiniteGuard:
+    """Protects training from fp16 overflow batches.
+
+    GradScaler already skips the *optimizer* step when gradients overflow, but the
+    forward pass of that batch has by then written inf/NaN into BatchNorm running
+    statistics. Training (batch statistics) keeps working, while every evaluation
+    (running statistics) returns NaN. This guard snapshots the running stats before
+    each forward pass and restores them when the loss or the stats become non-finite,
+    and the batch is skipped.
+    """
+
+    def __init__(self, model: nn.Module, max_bad_fraction: float = 0.2) -> None:
+        self.buffers = [
+            b for n, b in model.named_buffers() if n.endswith(("running_mean", "running_var"))
+        ]
+        self.max_bad_fraction = max_bad_fraction
+        self._snapshot: List[torch.Tensor] = []
+        self.bad = 0
+        self.total = 0
+
+    def before_forward(self) -> None:
+        self._snapshot = [b.detach().clone() for b in self.buffers]
+
+    def check(self, loss: torch.Tensor) -> bool:
+        """Return True if the batch is usable; otherwise restore BN stats and return False."""
+        self.total += 1
+        flags = [torch.isfinite(loss.detach()).all()] + [torch.isfinite(b).all() for b in self.buffers]
+        if bool(torch.stack(flags).all()):
+            return True
+        with torch.no_grad():
+            for buf, snap in zip(self.buffers, self._snapshot):
+                buf.copy_(snap)
+        self.bad += 1
+        return False
+
+    def end_epoch(self, tag: str) -> int:
+        bad, total = self.bad, self.total
+        self.bad, self.total = 0, 0
+        if total and bad / total > self.max_bad_fraction:
+            raise RuntimeError(
+                f"{tag}: {bad}/{total} training batches produced NaN/inf. Mixed precision is unstable "
+                "for this run; disable it with the config override 'training.amp=false'."
+            )
+        return bad

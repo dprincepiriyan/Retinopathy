@@ -51,14 +51,27 @@ class ColabTPUAccelerator:
     def __init__(self, prefer_tpu: bool = False) -> None:
         self._xm: Any = None
         self.info = self._detect_hardware(prefer_tpu=prefer_tpu)
+        self.amp_enabled = True
         self.grad_scaler = None
         if self.uses_grad_scaler:
+            self.grad_scaler = torch.amp.GradScaler("cuda")
+
+    def set_amp(self, enabled: bool) -> None:
+        """Turn mixed precision on/off (off = plain fp32: slower but immune to fp16 overflow)."""
+        self.amp_enabled = bool(enabled)
+        if not self.amp_enabled:
+            self.grad_scaler = None
+        elif self.uses_grad_scaler and self.grad_scaler is None:
             self.grad_scaler = torch.amp.GradScaler("cuda")
 
     @property
     def uses_grad_scaler(self) -> bool:
         """float16 autocast on CUDA needs dynamic loss scaling."""
-        return self.info.backend == "cuda" and self.info.amp_dtype == torch.float16
+        return (
+            self.info.backend == "cuda"
+            and self.info.amp_dtype == torch.float16
+            and getattr(self, "amp_enabled", True)
+        )
 
     def _detect_hardware(self, prefer_tpu: bool = True) -> AcceleratorInfo:
         if prefer_tpu:
@@ -102,7 +115,7 @@ class ColabTPUAccelerator:
 
     def autocast_context(self, enabled: bool = True):
         """Return the appropriate mixed-precision autocast context manager (`bfloat16` on TPU)."""
-        if not enabled:
+        if not enabled or not getattr(self, "amp_enabled", True):
             return nullcontext()
         if self.info.is_tpu:
             return torch.autocast("xla", dtype=torch.bfloat16)
