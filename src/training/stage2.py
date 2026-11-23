@@ -90,7 +90,8 @@ def predict_stage2(model, loader, accel: ColabTPUAccelerator) -> Dict[str, np.nd
     probs, cont, ref, ys, ids = [], [], [], [], []
     for batch in loader:
         x = batch["image"].to(accel.device, non_blocking=True)
-        with accel.autocast_context(enabled=True):
+        # Evaluate in fp32 like the deployed pipeline: fp16 can overflow on a few images in eval mode.
+        with accel.autocast_context(enabled=False):
             tri = model(x)["tri_head"]
         probs.append(tri.class_probs.float().cpu().numpy())
         cont.append(tri.continuous_score.float().squeeze(1).cpu().numpy())

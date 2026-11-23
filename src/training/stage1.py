@@ -57,7 +57,8 @@ def evaluate_stage1(model, loader, criterion, accel: ColabTPUAccelerator) -> Dic
         x = batch["image"].to(accel.device, non_blocking=True)
         y = batch["multi_label"].to(accel.device)
         m = batch["multi_label_mask"].to(accel.device)
-        with accel.autocast_context(enabled=True):
+        # Evaluate in fp32 like the deployed pipeline: fp16 can overflow on a few images in eval mode.
+        with accel.autocast_context(enabled=False):
             out = model(x)
         loss = _stage1_loss(criterion, out, y, m)
         total_loss += float(loss.item())
