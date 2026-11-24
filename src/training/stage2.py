@@ -17,6 +17,9 @@ CV can be spread over several Colab sessions.
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -26,6 +29,7 @@ import torch
 import torch.nn.functional as F
 
 from src.data.augmentations import RetinalTrainAugment
+from src.data.samplers import EffectiveNumberSampler
 from src.data.datasets import PreprocessedManifestDataset
 from src.losses import CORALOrdinalFocalLoss, SoftQWKLoss
 from src.models.factory import build_model, load_model_checkpoint, save_model_checkpoint
@@ -51,6 +55,41 @@ from src.utils.metrics import compute_clinical_metrics, quadratic_weighted_kappa
 from src.utils.tpu_accelerator import ColabTPUAccelerator
 
 DEFAULT_THRESHOLDS = (0.5, 1.5, 2.5, 3.5)
+# Bump whenever the training recipe changes in a way that invalidates earlier fold files.
+STAGE2_RECIPE_VERSION = 2
+# Settings that may change between sessions without invalidating a run.
+_FINGERPRINT_IGNORE = {"training": ("amp", "num_workers")}
+
+
+def recipe_fingerprint(cfg: Dict[str, Any]) -> str:
+    """Short hash of the recipe; fold files from a different recipe are never reused."""
+    c = copy.deepcopy(cfg)
+    for section, keys in _FINGERPRINT_IGNORE.items():
+        for k in keys:
+            c.get(section, {}).pop(k, None)
+    blob = json.dumps({"v": STAGE2_RECIPE_VERSION, "cfg": c}, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
+def _done_path(out_dir: Path, fold: int) -> Path:
+    return out_dir / f"stage2_fold{fold}.done"
+
+
+def _is_done(out_dir: Path, fold: int, fingerprint: str) -> bool:
+    path = _done_path(out_dir, fold)
+    return path.exists() and path.read_text().strip() == fingerprint
+
+
+def _recall_str(metrics: Dict[str, Any]) -> str:
+    return " ".join("%.2f" % metrics["recall_grade_%d" % k] for k in range(5))
+
+
+def _class_distribution(labels: np.ndarray, sample_probs: Optional[np.ndarray], num_classes: int = 5) -> np.ndarray:
+    """Class distribution the model actually sees during training (after the sampler, if any)."""
+    labels = np.asarray(labels, dtype=np.int64)
+    w = np.ones(len(labels)) if sample_probs is None else np.asarray(sample_probs, dtype=np.float64)
+    dist = np.bincount(labels, weights=w, minlength=num_classes)[:num_classes]
+    return dist / dist.sum()
 
 
 def fold_ckpt_name(fold: int) -> str:
@@ -144,10 +183,29 @@ def train_stage2_fold(
     phases: List[Dict[str, Any]] = cfg["curriculum"]
     total_epochs = sum(int(p["epochs"]) for p in phases)
 
+    fingerprint = recipe_fingerprint(cfg)
     model_spec = {"task": "stage2", **cfg["model"]}
     model = build_model(model_spec).to(accel.device)
+    strategy = cfg.get("imbalance", {}).get("strategy", "sampler")
+    beta = float(cfg.get("imbalance", {}).get("effective_number_beta", 0.999))
+    if hasattr(model, "tri_head"):
+        # Start the CORAL thresholds at the class distribution seen in training, with gaps wide
+        # enough for every grade to be predictable (overwritten below when resuming).
+        train_labels = PreprocessedManifestDataset(
+            manifest_csv=manifest, split="train_val", exclude_fold=val_fold,
+            resolution=int(phases[0]["resolution"]), data_root_override=str(data_root),
+        ).dr_grades()
+        probs = (EffectiveNumberSampler(beta=beta).compute_sample_probabilities(train_labels, num_classes=5)
+                 if strategy == "sampler" else None)
+        b0 = model.tri_head.init_ordinal_biases(_class_distribution(train_labels, probs))
+        print(f"[stage2 fold {val_fold}] initial CORAL thresholds: {[round(float(v), 2) for v in b0]}")
     optimizer = torch.optim.AdamW(
-        parameter_groups(model, float(tcfg.get("backbone_lr_mult", 0.2)), float(tcfg["weight_decay"])),
+        parameter_groups(
+            model,
+            float(tcfg.get("backbone_lr_mult", 0.2)),
+            float(tcfg["weight_decay"]),
+            coral_bias_lr_mult=float(tcfg.get("coral_bias_lr_mult", 1.0)),
+        ),
         lr=float(phases[0]["lr"]),
     )
     ema = ModelEMA(model, decay=float(tcfg["ema_decay"])) if tcfg.get("ema_decay") else None
@@ -155,13 +213,16 @@ def train_stage2_fold(
     guard = NonFiniteGuard(model)
     qwk_fn = SoftQWKLoss(num_classes=5)
     lw = cfg.get("loss", {}).get("weights", {})
-    strategy = cfg.get("imbalance", {}).get("strategy", "sampler")
-    select_metric = tcfg.get("select_metric", "qwk")
+    select_metric = tcfg.get("select_metric", "qwk_continuous_default_thr")
 
     last_path = out_dir / f"stage2_fold{val_fold}_last.pt"
     best_path = out_dir / fold_ckpt_name(val_fold)
     start_epoch, best_score, history = 1, -1.0, []
-    if resume and (state := load_training_state(last_path)) is not None:
+    state = load_training_state(last_path) if resume else None
+    if state is not None and state.get("fingerprint") != fingerprint:
+        print(f"[stage2 fold {val_fold}] ignoring {last_path.name}: it belongs to a different training recipe")
+        state = None
+    if state is not None:
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         if ema and state.get("ema"):
@@ -186,7 +247,7 @@ def train_stage2_fold(
             maybe_subsample(tr, dcfg.get("max_train_samples"), seed)
             maybe_subsample(va, dcfg.get("max_eval_samples"), seed)
             sampler = (
-                balanced_sampler(tr.dr_grades(), 5, float(cfg["imbalance"].get("effective_number_beta", 0.999)), seed)
+                balanced_sampler(tr.dr_grades(), 5, beta, seed)
                 if strategy == "sampler" else None
             )
             loaders_cache[res] = (
@@ -257,7 +318,8 @@ def train_stage2_fold(
                 best_score = float(score)
                 save_model_checkpoint(
                     best_path, eval_model, {**model_spec, "input_size": res},
-                    {"epoch": epoch, "val_fold": val_fold, "phase": phase.get("name", ""), "val_metrics": vm},
+                    {"epoch": epoch, "val_fold": val_fold, "phase": phase.get("name", ""), "val_metrics": vm,
+                     "recipe_fingerprint": fingerprint},
                 )
                 np.savez_compressed(out_dir / f"stage2_fold{val_fold}_val_preds.npz", **val_pred)
                 mirror_to(best_path, mirror)
@@ -271,14 +333,15 @@ def train_stage2_fold(
                 optimizer=optimizer.state_dict(),
                 ema=ema.state_dict() if ema else None,
                 scaler=accel.grad_scaler.state_dict() if accel.grad_scaler is not None else None,
-                epoch=epoch, best_score=best_score, history=history,
+                epoch=epoch, best_score=best_score, history=history, fingerprint=fingerprint,
             )
             mirror_to(last_path, mirror)
             print(
                 f"[stage2 fold {val_fold}] epoch {epoch:02d}/{total_epochs} {phase.get('name', '')}@{res}px "
                 f"({time.time() - t0:.0f}s) loss={running / max(n_b, 1):.4f} QWK={vm['qwk']:.4f} "
                 f"QWK(cont)={vm['qwk_continuous_default_thr']:.4f} F1={vm['macro_f1']:.4f} "
-                f"mildRecall={vm['mild_dr_recall']:.3f} refAUC={vm['referable_auc']:.4f}"
+                f"mildRecall={vm['mild_dr_recall']:.3f} refAUC={vm['referable_auc']:.4f} "
+                f"recall0-4=[{_recall_str(vm)}]"
                 + (f" skipped_steps={skipped}" if skipped else "")
                 + (f" nonfinite_batches={skipped_bad}" if skipped_bad else "")
                 + (" *saved*" if improved else "")
@@ -295,11 +358,12 @@ def train_stage2_fold(
     test_pred = predict_stage2(best_model, make_loader(test_ds, bs_eval, False, nw, pin, seed), accel)
     np.savez_compressed(out_dir / f"stage2_fold{val_fold}_test_preds.npz", **test_pred)
     mirror_to(out_dir / f"stage2_fold{val_fold}_test_preds.npz", mirror)
-    summary = {"val_fold": val_fold, "best_val_score": best_score, "test_metrics": stage2_metrics(test_pred), "history": history}
+    summary = {"val_fold": val_fold, "best_val_score": best_score, "select_metric": select_metric,
+               "recipe_fingerprint": fingerprint, "test_metrics": stage2_metrics(test_pred), "history": history}
     write_json(out_dir / f"stage2_fold{val_fold}_metrics.json", summary)
-    (out_dir / f"stage2_fold{val_fold}.done").write_text("done\n")
+    _done_path(out_dir, val_fold).write_text(fingerprint + "\n")
     mirror_to(out_dir / f"stage2_fold{val_fold}_metrics.json", mirror)
-    mirror_to(out_dir / f"stage2_fold{val_fold}.done", mirror)
+    mirror_to(_done_path(out_dir, val_fold), mirror)
     return summary
 
 
@@ -366,28 +430,32 @@ def run_stage2_cv(
     folds = list(folds or all_folds)
     accel = accel or ColabTPUAccelerator(prefer_tpu=False)
     mirror = Path(mirror_dir) if mirror_dir else None
+    fingerprint = recipe_fingerprint(cfg)
+    print(f"[stage2] recipe fingerprint {fingerprint}")
     for f in sorted(set(folds) | set(all_folds)):
         # Restore finished-fold artifacts from the mirror (e.g. Drive) after a new Colab session.
-        if mirror is not None and (mirror / f"stage2_fold{f}.done").exists() and not (out_dir / f"stage2_fold{f}.done").exists():
+        if mirror is not None and _is_done(mirror, f, fingerprint) and not _is_done(out_dir, f, fingerprint):
             for name in (fold_ckpt_name(f), f"stage2_fold{f}_val_preds.npz", f"stage2_fold{f}_test_preds.npz",
                          f"stage2_fold{f}_metrics.json", f"stage2_fold{f}.done"):
                 if (mirror / name).exists():
                     mirror_to(mirror / name, out_dir)
-        if (out_dir / f"stage2_fold{f}.done").exists():
+        if _is_done(out_dir, f, fingerprint):
             if f in folds:
                 print(f"[stage2] fold {f} already finished - skipping")
             continue
         if f not in folds:
             continue
+        if _done_path(out_dir, f).exists() or (mirror is not None and _done_path(mirror, f).exists()):
+            print(f"[stage2] fold {f}: existing files are from a different training recipe - retraining")
         if mirror is not None and (mirror / f"stage2_fold{f}_last.pt").exists() and not (out_dir / f"stage2_fold{f}_last.pt").exists():
             mirror_to(mirror / f"stage2_fold{f}_last.pt", out_dir)
         train_stage2_fold(cfg, f, data_root, out_dir, mirror_dir, accel)
 
-    if all((out_dir / f"stage2_fold{f}.done").exists() for f in all_folds):
+    if all(_is_done(out_dir, f, fingerprint) for f in all_folds):
         summary = aggregate_cv(out_dir, all_folds, mirror_dir)
         print("[stage2] OOF:", summary["oof_metrics"])
         print("[stage2] TEST (fold ensemble):", summary["test_ensemble_metrics"])
         return summary
-    missing = [f for f in all_folds if not (out_dir / f"stage2_fold{f}.done").exists()]
+    missing = [f for f in all_folds if not _is_done(out_dir, f, fingerprint)]
     print(f"[stage2] folds still to train: {missing}")
     return None

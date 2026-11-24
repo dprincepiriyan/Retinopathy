@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 from src.tier3_grading.gem_pooling import GeMPooling2d
-from src.tier3_grading.multihead_grading import TriHeadDiagnosticLayer
+from src.tier3_grading.multihead_grading import CORAL_BIAS_PARAM_SUFFIXES, TriHeadDiagnosticLayer
 
 
 def _require_timm():
@@ -145,25 +145,35 @@ class PretrainedOrdinalGrader(nn.Module):
         }
 
 
-def parameter_groups(model: nn.Module, backbone_lr_mult: float, weight_decay: float) -> List[dict]:
+def parameter_groups(
+    model: nn.Module,
+    backbone_lr_mult: float,
+    weight_decay: float,
+    coral_bias_lr_mult: float = 1.0,
+) -> List[dict]:
     """AdamW parameter groups.
 
     - Pretrained backbone parameters (names starting with `backbone.`) get `lr_mult`
       = `backbone_lr_mult` (typically 0.1-0.3) so ImageNet features are not destroyed.
+    - The CORAL threshold scalars (`tri_head.base_bias`, `tri_head.bias_deltas`) get
+      `lr_mult` = `coral_bias_lr_mult` (default 1.0). Their *initialisation* is what keeps every
+      grade predictable; on real APTOS features a boosted lr let the loss shrink the gaps
+      again until grade 3 was never predicted, so the default leaves it at the base lr.
     - Norm weights, biases and the GeM `p` get no weight decay.
     The schedule sets `group["lr"] = base_lr * factor * group["lr_mult"]`.
     """
-    groups: Dict[Tuple[bool, bool], List[nn.Parameter]] = {}
+    groups: Dict[Tuple[float, bool], List[nn.Parameter]] = {}
     for name, param in model.named_parameters():
-        is_backbone = name.startswith("backbone.")
+        if name.endswith(CORAL_BIAS_PARAM_SUFFIXES):
+            mult = coral_bias_lr_mult
+        elif name.startswith("backbone."):
+            mult = backbone_lr_mult
+        else:
+            mult = 1.0
         no_decay = param.ndim <= 1 or name.endswith(".bias") or name.endswith(".p")
-        groups.setdefault((is_backbone, no_decay), []).append(param)
+        groups.setdefault((float(mult), no_decay), []).append(param)
 
     return [
-        {
-            "params": params,
-            "lr_mult": backbone_lr_mult if is_backbone else 1.0,
-            "weight_decay": 0.0 if no_decay else weight_decay,
-        }
-        for (is_backbone, no_decay), params in groups.items()
+        {"params": params, "lr_mult": mult, "weight_decay": 0.0 if no_decay else weight_decay}
+        for (mult, no_decay), params in groups.items()
     ]

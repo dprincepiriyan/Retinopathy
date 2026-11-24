@@ -46,7 +46,11 @@ stage2_grading:
     grad_clip: 2.0
     ema_decay: 0.999
     num_workers: 2
-    select_metric: "qwk"             # or qwk_continuous_default_thr / referable_auc
+    # CORAL thresholds start 2 logits apart (all grades predictable) and keep the base lr: tests on
+    # real APTOS features showed a boosted lr lets the loss shrink the gaps until grade 3 vanishes.
+    coral_bias_lr_mult: 1.0
+    # Best epoch = QWK of the continuous score (the head the deployed, calibrated pipeline grades with).
+    select_metric: "qwk_continuous_default_thr"   # or qwk (argmax of class probs) / referable_auc
 
   curriculum:
     - name: "phase_a_512"
@@ -61,7 +65,7 @@ stage2_grading:
       train_gem_p: false
     - name: "phase_b_768"
       resolution: 768
-      epochs: 8
+      epochs: 14                     # longer high-res phase: microaneurysms (mild DR) need 768 px
       batch_size: 8
       grad_accum_steps: 4            # effective batch 32
       lr: 8.0e-5

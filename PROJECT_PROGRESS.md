@@ -92,7 +92,7 @@ All **31 unit tests** in `tests/` pass (`pytest tests -q`):
 
 1. **Upload `retinopathy_processed.tar.gz` to Google Drive** (unchanged archive; the combined Stage-1 manifest is built automatically on Colab).
 2. **Notebook 01 — Stage-1 triage:** pretrained EfficientNet-B3, combined manifest, masked ASL loss. Watch `auc_dr_within_source_mean`.
-3. **Notebook 02 — Stage-2 grading, 4-fold CV:** Phase A 512 px (12 epochs) → Phase B 768 px (8 epochs) per fold. Spread folds across sessions with `FOLDS = [1, 2]` / `[3, 4]`; everything resumes from Drive.
+3. **Notebook 02 — Stage-2 grading, 4-fold CV:** Phase A 512 px (12 epochs) → Phase B 768 px (14 epochs) per fold (~1 h 25 min per fold on a T4). Spread folds across sessions with `FOLDS = [1, 2]` / `[3, 4]`; everything resumes from Drive.
 4. **Notebook 03 — Calibration:** thresholds / temperature / conformal from true OOF predictions; test-split report with bootstrap CIs.
 5. Copy `calibration_params.json`, `stage1_multi_label_best.pth` and `stage2_grader_fold*.pth` into `checkpoints/` and run `streamlit run app/dashboard.py`.
 

@@ -16,6 +16,17 @@ import torch.nn.functional as F
 
 from src.losses.ordinal_focal_loss import coral_logits_to_probs
 
+# Parameter names of the CORAL thresholds (their lr multiplier is set in
+# `src.models.pretrained.parameter_groups`).
+CORAL_BIAS_PARAM_SUFFIXES = ("tri_head.base_bias", "tri_head.bias_deltas")
+MIN_CORAL_GAP = 0.15
+DEFAULT_CORAL_GAP = 2.0
+
+
+def _softplus_inverse(x) -> torch.Tensor:
+    x = torch.as_tensor(x, dtype=torch.float32).clamp_min(1e-4)
+    return x + torch.log(-torch.expm1(-x))
+
 
 @dataclass
 class TriHeadOutput:
@@ -47,9 +58,14 @@ class TriHeadDiagnosticLayer(nn.Module):
 
         # 1. Rank-consistent CORAL head: single shared weight vector + monotonically ordered biases
         self.coral_weight = nn.Linear(in_features, 1, bias=False)
-        # Parameterize bias increments via softplus so b_0 > b_1 > b_2 > b_3 is mathematically guaranteed
-        self.base_bias = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
-        self.bias_deltas = nn.Parameter(torch.zeros(self.num_thresholds - 1, dtype=torch.float32))
+        # Parameterize bias increments via softplus so b_0 > b_1 > b_2 > b_3 is mathematically guaranteed.
+        # The gaps MUST start wide: with gaps < ~1.1 logits a middle grade can never be the argmax
+        # class (P(y=k) = sigmoid(s+b_{k-1}) - sigmoid(s+b_k) is too small), and Adam moves these
+        # scalars only ~lr per step, so the initial gaps stay close to where they start.
+        self.base_bias = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+        self.bias_deltas = nn.Parameter(
+            torch.full((self.num_thresholds - 1,), _softplus_inverse(DEFAULT_CORAL_GAP - MIN_CORAL_GAP))
+        )
 
         # 2. Dedicated Referable DR (Grade >= 2) binary safety head
         self.referable_head = nn.Sequential(
@@ -65,9 +81,31 @@ class TriHeadDiagnosticLayer(nn.Module):
             nn.Linear(in_features // 2, 1),
         )
 
+    @torch.no_grad()
+    def init_ordinal_biases(self, class_prior, min_gap: float = DEFAULT_CORAL_GAP) -> torch.Tensor:
+        """Initialise the CORAL thresholds from the (training / sampling) class distribution.
+
+        b_k starts at logit(P(y > k)) so that a zero score reproduces the class prior, but every
+        gap is widened to at least `min_gap` so that all grades are reachable by argmax.
+        Returns the initial bias vector.
+        """
+        prior = torch.as_tensor(class_prior, dtype=torch.float64).flatten()
+        if prior.numel() != self.num_classes or float(prior.sum()) <= 0:
+            raise ValueError(f"class_prior must have {self.num_classes} non-negative entries")
+        prior = prior / prior.sum()
+        exceed = (1.0 - torch.cumsum(prior, 0)[:-1]).clamp(1e-3, 1 - 1e-3)  # P(y > k), k = 0..K-2
+        target = torch.log(exceed / (1.0 - exceed))
+        biases = [float(target[0])]
+        for k in range(1, self.num_thresholds):
+            biases.append(min(float(target[k]), biases[-1] - min_gap))
+        gaps = torch.tensor([biases[k - 1] - biases[k] for k in range(1, self.num_thresholds)])
+        self.base_bias.copy_(torch.tensor(biases[0], dtype=self.base_bias.dtype))
+        self.bias_deltas.copy_(_softplus_inverse(gaps - MIN_CORAL_GAP).to(self.bias_deltas.dtype))
+        return self.get_ordered_coral_biases().detach()
+
     def get_ordered_coral_biases(self) -> torch.Tensor:
         """Compute monotonically decreasing bias vector [b_0, b_1, b_2, b_3]."""
-        positive_gaps = F.softplus(self.bias_deltas) + 0.15
+        positive_gaps = F.softplus(self.bias_deltas) + MIN_CORAL_GAP
         cum_drops = torch.cumsum(positive_gaps, dim=0)
         biases = torch.cat(
             [self.base_bias.unsqueeze(0), self.base_bias.unsqueeze(0) - cum_drops], dim=0

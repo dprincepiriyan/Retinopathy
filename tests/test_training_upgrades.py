@@ -250,3 +250,105 @@ def test_amp_can_be_disabled() -> None:
     assert accel.grad_scaler is None and not accel.uses_grad_scaler
     with accel.autocast_context(enabled=True):
         assert torch.ones(1).dtype == torch.float32
+
+
+# --------------------------------------------------------------------------- CORAL threshold fix
+APTOS_LIKE_PRIOR = [1780, 318, 867, 170, 260]  # heavily skewed, mild & severe are rare
+
+
+def _argmax_reachable_grades(tri_head) -> set:
+    from src.losses.ordinal_focal_loss import coral_logits_to_probs
+
+    biases = tri_head.get_ordered_coral_biases().detach()
+    scores = torch.linspace(-20, 20, 4001).unsqueeze(1)
+    return set(coral_logits_to_probs(scores + biases).argmax(1).tolist())
+
+
+def test_coral_default_and_prior_init_make_every_grade_reachable() -> None:
+    from src.tier3_grading.multihead_grading import TriHeadDiagnosticLayer
+
+    head = TriHeadDiagnosticLayer(in_features=8)
+    assert _argmax_reachable_grades(head) == {0, 1, 2, 3, 4}
+
+    b = head.init_ordinal_biases(APTOS_LIKE_PRIOR)
+    assert _argmax_reachable_grades(head) == {0, 1, 2, 3, 4}
+    gaps = (b[:-1] - b[1:]).numpy()
+    assert (gaps >= 2.0 - 1e-4).all()
+    p_above_0 = 1 - APTOS_LIKE_PRIOR[0] / sum(APTOS_LIKE_PRIOR)
+    assert abs(float(b[0]) - np.log(p_above_0 / (1 - p_above_0))) < 1e-4  # b_0 = logit P(y > 0)
+
+
+def test_coral_thresholds_get_boosted_lr_and_no_weight_decay() -> None:
+    from src.models.pretrained import parameter_groups
+
+    model = build_model(TINY_S2)
+    groups = parameter_groups(model, backbone_lr_mult=0.2, weight_decay=0.01, coral_bias_lr_mult=20.0)
+    ids = {id(model.tri_head.base_bias), id(model.tri_head.bias_deltas)}
+    for g in groups:
+        hit = {id(p) for p in g["params"]} & ids
+        if hit:
+            assert g["lr_mult"] == 20.0 and g["weight_decay"] == 0.0
+            ids -= hit
+    assert not ids
+    n_params = sum(len(g["params"]) for g in groups)
+    assert n_params == len(list(model.parameters()))
+
+
+def test_coral_head_keeps_every_grade_predictable_after_training() -> None:
+    """Guard against the 'only grades 0 and 4 are ever predicted' failure seen on Colab."""
+    from src.losses import CORALOrdinalFocalLoss
+    from src.models.pretrained import parameter_groups
+    from src.tier3_grading.multihead_grading import TriHeadDiagnosticLayer
+
+    def train(old_init: bool):
+        torch.manual_seed(0)
+        model = torch.nn.Module()
+        model.tri_head = TriHeadDiagnosticLayer(in_features=64, dropout=0.0)
+        if old_init:  # the original initialisation: gaps of 0.84 logits
+            with torch.no_grad():
+                model.tri_head.base_bias.fill_(0.5)
+                model.tri_head.bias_deltas.zero_()
+        else:
+            model.tri_head.init_ordinal_biases(APTOS_LIKE_PRIOR)
+        y = torch.randint(0, 5, (1000,))
+        v = torch.randn(64)
+        v = (v - v.mean()) / (v - v.mean()).norm()
+        x = torch.randn(1000, 64) + 4.8 * (y.float() - 2).unsqueeze(1) * v  # grade spread over all dims
+        opt = torch.optim.AdamW(parameter_groups(model, 0.2, 1e-2), lr=3e-4)
+        for g in opt.param_groups:
+            g["lr"] = 3e-4 * g["lr_mult"]
+        loss_fn = CORALOrdinalFocalLoss(gamma=1.0, alpha=0.5, threshold_weights=torch.ones(4))
+        for _ in range(1000):
+            opt.zero_grad()
+            loss_fn(model.tri_head(x).ordinal_logits, y).backward()
+            opt.step()
+        with torch.no_grad():
+            pred = model.tri_head(x).class_probs.argmax(1)
+        return [(pred[y == k] == k).float().mean().item() for k in range(5)], model.tri_head
+
+    recalls, head = train(old_init=False)
+    assert _argmax_reachable_grades(head) == {0, 1, 2, 3, 4}
+    assert min(recalls) > 0.1, recalls
+    old_recalls, _ = train(old_init=True)
+    assert old_recalls[1] == old_recalls[2] == old_recalls[3] == 0.0  # documents the original bug
+
+
+def test_stage2_recipe_fingerprint_rejects_stale_fold_files(tmp_path) -> None:
+    import copy
+
+    from src.training.stage2 import _is_done, recipe_fingerprint
+
+    cfg = {"model": {"backbone_name": "efficientnet_b3"}, "training": {"amp": True, "num_workers": 2, "lr": 1},
+           "curriculum": [{"epochs": 12}, {"epochs": 14}]}
+    fp = recipe_fingerprint(cfg)
+    same = copy.deepcopy(cfg)
+    same["training"].update(amp=False, num_workers=0)  # session-level switches keep the run valid
+    assert recipe_fingerprint(same) == fp
+    changed = copy.deepcopy(cfg)
+    changed["curriculum"][1]["epochs"] = 8
+    assert recipe_fingerprint(changed) != fp
+
+    (tmp_path / "stage2_fold1.done").write_text("done\n")  # marker written by the old recipe
+    assert not _is_done(tmp_path, 1, fp)
+    (tmp_path / "stage2_fold1.done").write_text(fp + "\n")
+    assert _is_done(tmp_path, 1, fp)
