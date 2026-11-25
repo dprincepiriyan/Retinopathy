@@ -55,7 +55,7 @@ def main() -> None:
     with st.sidebar:
         st.header("📋 Patient & Exam Metadata")
         patient_id = st.text_input("Patient ID", value="PT-2026-0842")
-        patient_name = st.text_input("Patient Name", value="R. Venkataraman")
+        patient_name = st.text_input("Patient Name", value="")
         patient_age = st.number_input("Patient Age", min_value=1, max_value=120, value=58)
 
         st.divider()
@@ -82,11 +82,11 @@ def main() -> None:
         st.header("✍️ Clinician Sign-Off")
         doctor_notes = st.text_area(
             "Reviewing Ophthalmologist Notes",
-            value="Correlate with macular OCT and HbA1c panel.",
+            value="",
         )
         doctor_signature = st.text_input(
             "Verified By (Doctor Signature)",
-            value="Dr. A. Subramanian, MD (Ophthalmology)",
+            value="",
         )
 
     od_img: np.ndarray | None = None
@@ -204,13 +204,15 @@ def main() -> None:
 
     st.divider()
     st.subheader("📄 Printable Hospital Report Card & 1-Click PDF Export")
-    pdf_bytes = pdf_generator.generate_pdf_bytes(report)
-    st.download_button(
-        label="⬇️ Download Clinical PDF Report (WeasyPrint / PDF-1.4)",
-        data=pdf_bytes,
-        file_name=f"RetinaNetPro_Report_{report.patient_id}.pdf",
-        mime="application/pdf",
-    )
+    if pipeline.stage1_trained and pipeline.stage2_trained:
+        st.download_button(
+            label="⬇️ Download Clinical PDF Report (WeasyPrint / PDF-1.4)",
+            data=pdf_generator.generate_pdf_bytes(report),
+            file_name=f"RetinaNetPro_Report_{report.patient_id}.pdf",
+            mime="application/pdf",
+        )
+    else:
+        st.info("PDF export is disabled in demo mode (untrained networks).")
 
     with st.expander("Preview Rendered HTML Clinical Report Card", expanded=False):
         html_str = template_engine.render_html_report(report)
