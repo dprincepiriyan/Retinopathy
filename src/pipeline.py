@@ -32,6 +32,7 @@ from src.tier5_reporting.findings_schema import (
     LesionLocationItem,
     ONHBiomarkerSummary,
 )
+from src.training.calibration import apply_temperature
 from src.utils.iqa_gatekeeper import IQAGatekeeper
 
 
@@ -54,8 +55,8 @@ class RetinaNetProPipeline:
     - Checkpoints are self-describing and loaded with `strict=True`.
     - Optional modules (Tier-1 CDAE denoiser, ONH disc/cup U-Net) are only used when a
       *trained* checkpoint exists; untrained networks never touch patient images.
-    - Probabilities are temperature-scaled before conformal sets are built, exactly as
-      during calibration, and the primary grade uses the QWK-optimised thresholds.
+    - Probabilities are temperature-scaled via `src.training.calibration.apply_temperature`
+      before conformal sets are built, and the primary grade uses the QWK-optimised thresholds.
     """
 
     STAGE1_CKPT = "stage1_multi_label_best.pth"
@@ -178,13 +179,6 @@ class RetinaNetProPipeline:
         x = torch.rot90(x, k=view // 2, dims=(2, 3))
         return torch.flip(x, dims=(3,)) if view % 2 else x
 
-    def _apply_temperature(self, probs: np.ndarray) -> np.ndarray:
-        if abs(self.temperature - 1.0) < 1e-9:
-            return probs
-        logits = np.log(np.clip(probs, 1e-8, 1.0)) / max(self.temperature, 1e-3)
-        e = np.exp(logits - logits.max())
-        return e / e.sum()
-
     def _grade_stage2(self, enhanced_rgb: np.ndarray) -> Dict[str, object]:
         """Fold-ensemble x TTA Stage-2 prediction for one eye."""
         class_probs, ref_probs, cont_scores = [], [], []
@@ -200,8 +194,9 @@ class RetinaNetProPipeline:
                 if first_out is None:
                     first_out = out
         mean_probs = np.mean(class_probs, axis=0)
+        norm_probs = mean_probs / mean_probs.sum()
         return {
-            "class_probs": self._apply_temperature(mean_probs / mean_probs.sum()),
+            "class_probs": apply_temperature(norm_probs[None], self.temperature)[0],
             "referable_prob": float(np.mean(ref_probs)),
             "continuous_score": float(np.clip(np.mean(cont_scores), 0.0, 4.5)),
             "ensemble_std": float(np.std(ref_probs)) if len(ref_probs) > 1 else 0.0,

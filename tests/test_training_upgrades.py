@@ -191,6 +191,7 @@ def test_pipeline_uses_trained_checkpoints_and_calibration(tmp_path) -> None:
     assert pipe.stage2_trained and len(pipe.stage2_members) == 2
     assert pipe.cdae is None and pipe.onh_unet is None  # untrained modules are never used
     assert pipe.has_calibration and abs(pipe.temperature - 1.7) < 1e-9
+    assert not hasattr(pipe, "_apply_temperature")  # uses shared apply_temperature from calibration.py
 
     img = generate_synthetic_fundus_image(size=256, laterality="OD", num_microaneurysms=6, seed=7)
     findings, vis = pipe.evaluate_eye(img, "OD")

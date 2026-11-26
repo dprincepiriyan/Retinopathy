@@ -7,9 +7,14 @@ Data use (no double-dipping between temperature and conformal calibration):
 - Conformal q_hat (alpha)      <- OOF half B, on temperature-scaled probabilities
 - Reported coverage / QWK / ECE <- the locked TEST split (fold-ensemble predictions)
 
-The pipeline applies exactly these quantities at inference time:
-probabilities are temperature-scaled before conformal sets are formed, and the
-primary grade comes from thresholding the continuous score.
+The pipeline applies these quantities at inference via the same `apply_temperature`
+helper, and the primary grade comes from thresholding the continuous score.
+
+Note on coverage: `q_hat` is fitted on single-fold OOF predictions, while inference
+averages all fold models (and optionally TTA views). Averaged probabilities are
+flatter, so formal split-conformal coverage does not automatically carry over;
+trust `test_report["conformal_coverage"]`, which measures empirical coverage on
+the fold-ensemble test predictions.
 """
 
 from __future__ import annotations

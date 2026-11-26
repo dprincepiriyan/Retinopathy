@@ -34,7 +34,7 @@ The system operates across a **6-Tier Modular Pipeline (Tiers 0–5)**:
 
 5. **Tier 4: Meta-Ensembling, Calibration & Explainability**
    - Out-of-fold stacking meta-learner (LightGBM/Ridge) + 8-view Dihedral Test-Time Augmentation (TTA).
-   - Temperature scaling ( < 0.04$) and Split Conformal Prediction (guaranteed 95% coverage predictive sets).
+   - Temperature scaling and Split Conformal Prediction (target 95% coverage predictive sets, measured on the test ensemble in `test_report.conformal_coverage`).
    - Dual Explainability: High-resolution **Grad-CAM++** for micro-lesions + **Cross-Attention Rollout** for quadrant-level involvement.
 
 6. **Tier 5: Clinical Reporting & Doctor Dashboard**

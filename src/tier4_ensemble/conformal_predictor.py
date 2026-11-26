@@ -1,7 +1,10 @@
 """Split Conformal Prediction Engine for Safety-Critical DR Grading.
 
-Provides a mathematically guaranteed (1 - alpha) = 95% marginal coverage rate:
+Targets a (1 - alpha) = 95% marginal coverage rate:
     P( Y_true in C(X) ) >= 1 - alpha
+Formal coverage only holds when calibrated on the same predictor distribution used at
+inference; when `q_hat` is fitted on single-fold OOF and deployed on a fold-ensemble
+(or with TTA), rely on empirical coverage measured on test (`test_report.conformal_coverage`).
 Outputs:
 - Prediction Set C(X), e.g., [2] (High confidence) or [1, 2] (Borderline Moderate confidence)
 - Confidence Tier ("HIGH", "MODERATE", "LOW_ABSTAIN")
@@ -29,8 +32,9 @@ class ConformalPredictionResult:
 class SplitConformalPredictor:
     """Split Conformal Prediction with the LAC score s = 1 - p(y_true) & ordinal adjacency rules.
 
-    Calibrate `q_hat_` with `fit()` on probabilities produced *exactly* as at inference
-    (i.e. after temperature scaling); otherwise the coverage guarantee does not hold.
+    Calibrate `q_hat_` with `fit()` on probabilities produced the same way as at inference
+    (after temperature scaling). When fitted on single-fold OOF and deployed on a
+    fold-ensemble or TTA, check empirical coverage on the test ensemble (`test_report.conformal_coverage`).
     The extra "add the runner-up grade" rule only enlarges sets, so coverage can only increase.
     """
 
