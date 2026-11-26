@@ -338,17 +338,94 @@ def test_stage2_recipe_fingerprint_rejects_stale_fold_files(tmp_path) -> None:
 
     from src.training.stage2 import _is_done, recipe_fingerprint
 
+    manifest = tmp_path / "stage2_grading_splits.csv"
+    manifest.write_text("image_id,fold\na,1\n")
+
     cfg = {"model": {"backbone_name": "efficientnet_b3"}, "training": {"amp": True, "num_workers": 2, "lr": 1},
            "curriculum": [{"epochs": 12}, {"epochs": 14}]}
-    fp = recipe_fingerprint(cfg)
+    fp = recipe_fingerprint(cfg, manifest)
     same = copy.deepcopy(cfg)
     same["training"].update(amp=False, num_workers=0)  # session-level switches keep the run valid
-    assert recipe_fingerprint(same) == fp
+    assert recipe_fingerprint(same, manifest) == fp
     changed = copy.deepcopy(cfg)
     changed["curriculum"][1]["epochs"] = 8
-    assert recipe_fingerprint(changed) != fp
+    assert recipe_fingerprint(changed, manifest) != fp
+
+    manifest.write_text("image_id,fold\na,2\n")  # re-split data invalidates old folds
+    assert recipe_fingerprint(cfg, manifest) != fp
 
     (tmp_path / "stage2_fold1.done").write_text("done\n")  # marker written by the old recipe
     assert not _is_done(tmp_path, 1, fp)
     (tmp_path / "stage2_fold1.done").write_text(fp + "\n")
     assert _is_done(tmp_path, 1, fp)
+
+
+def test_stage2_no_resume_retrains_finished_fold_and_cli_forwards_flag(tmp_path, monkeypatch) -> None:
+    from src.training import cli, stage2
+
+    manifest = tmp_path / "stage2_grading_splits.csv"
+    manifest.write_text("image_id,fold\na,1\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = {"data": {"manifest": manifest.name}, "cv": {"folds": [1, 2]}, "training": {"lr": 1e-3}}
+    fp = stage2.recipe_fingerprint(cfg, manifest)
+    (out / "stage2_fold1.done").write_text(fp + "\n")
+
+    calls = []
+    monkeypatch.setattr(stage2, "train_stage2_fold", lambda c, f, d, o, m, a, resume=True: calls.append((f, resume)))
+    stage2.run_stage2_cv(cfg, tmp_path, out, folds=[1], resume=True)
+    assert calls == []  # finished fold skipped when resuming
+
+    stage2.run_stage2_cv(cfg, tmp_path, out, folds=[1], resume=False)
+    assert calls == [(1, False)]  # finished fold retrained with resume=False
+
+    cli_calls = []
+    monkeypatch.setattr(stage2, "run_stage2_cv", lambda *a, **k: cli_calls.append(k["resume"]))
+    cli.main(["stage2", "--no-resume", "--data-root", str(tmp_path), "--out", str(out)])
+    assert cli_calls == [False]
+
+
+def test_stage1_ignores_resume_state_on_config_or_manifest_change(tmp_path) -> None:
+    import cv2
+
+    from src.training.common import load_training_state, save_training_state
+    from src.training.stage1 import LAST_STATE_NAME, train_stage1
+
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    img = generate_synthetic_fundus_image(size=64, laterality="OD", seed=1)
+    rows = []
+    for i in range(6):
+        p = img_dir / f"s{i}.jpg"
+        cv2.imwrite(str(p), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        fold, split = (0, "test") if i < 2 else ((4, "train_val") if i < 4 else (1, "train_val"))
+        rows.append({
+            "image_id": f"s{i}", "patient_id": f"p{i}", "source_dataset": "aptos",
+            "dr_grade": i % 2 * 2, "glaucoma": i % 2, "cataract": 0,
+            "fold": fold, "split": split, "path_512": str(p), "path_768": "",
+        })
+    _write_csv(tmp_path / "stage1_triage_splits.csv", rows)
+
+    cfg = {
+        "data": {"use_combined_manifest": False, "resolution": 64, "val_fold": 4, "augmentation": "d4_only"},
+        "model": {"arch": "timm", "backbone_name": "efficientnet_b0", "pretrained": False},
+        "training": {"seed": 0, "amp": False, "epochs": 1, "batch_size": 2, "lr": 1e-3,
+                     "weight_decay": 0.0, "ema_decay": None, "num_workers": 0},
+    }
+    out = tmp_path / "out"
+    # Pre-seed a mismatched state that would crash load_state_dict if not ignored.
+    save_training_state(out / LAST_STATE_NAME, model={"bogus": 1}, optimizer={}, epoch=1, best_score=0.9,
+                        history=[{"epoch": 1}], fingerprint="stale_fp")
+    summary = train_stage1(cfg, tmp_path, out, resume=True)
+    assert len(summary["history"]) == 1
+    saved = load_training_state(out / LAST_STATE_NAME)
+    assert saved is not None and saved["fingerprint"] != "stale_fp"
+
+    # Re-running with the same config/manifest resumes from epoch 1 (no extra epoch run).
+    resumed = train_stage1(cfg, tmp_path, out, resume=True)
+    assert [h["epoch"] for h in resumed["history"]] == [1]
+
+    # Changing epochs changes fingerprint -> ignores saved state and runs fresh from epoch 1.
+    cfg_changed = {**cfg, "training": {**cfg["training"], "epochs": 2}}
+    summary2 = train_stage1(cfg_changed, tmp_path, out, resume=True)
+    assert [h["epoch"] for h in summary2["history"]] == [1, 2]

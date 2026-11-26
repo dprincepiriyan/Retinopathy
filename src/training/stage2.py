@@ -17,9 +17,6 @@ CV can be spread over several Colab sessions.
 
 from __future__ import annotations
 
-import copy
-import hashlib
-import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,6 +40,7 @@ from src.training.common import (
     make_loader,
     maybe_subsample,
     mirror_to,
+    recipe_fingerprint as _recipe_fingerprint,
     save_training_state,
     set_lr,
     set_seed,
@@ -57,18 +55,11 @@ from src.utils.tpu_accelerator import ColabTPUAccelerator
 DEFAULT_THRESHOLDS = (0.5, 1.5, 2.5, 3.5)
 # Bump whenever the training recipe changes in a way that invalidates earlier fold files.
 STAGE2_RECIPE_VERSION = 2
-# Settings that may change between sessions without invalidating a run.
-_FINGERPRINT_IGNORE = {"training": ("amp", "num_workers")}
 
 
-def recipe_fingerprint(cfg: Dict[str, Any]) -> str:
-    """Short hash of the recipe; fold files from a different recipe are never reused."""
-    c = copy.deepcopy(cfg)
-    for section, keys in _FINGERPRINT_IGNORE.items():
-        for k in keys:
-            c.get(section, {}).pop(k, None)
-    blob = json.dumps({"v": STAGE2_RECIPE_VERSION, "cfg": c}, sort_keys=True, default=str)
-    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+def recipe_fingerprint(cfg: Dict[str, Any], manifest_path: Optional[str | Path] = None) -> str:
+    """Short hash of the recipe + manifest; fold files from a different recipe or split are never reused."""
+    return _recipe_fingerprint(cfg, manifest_path=manifest_path, version=STAGE2_RECIPE_VERSION)
 
 
 def _done_path(out_dir: Path, fold: int) -> Path:
@@ -183,7 +174,7 @@ def train_stage2_fold(
     phases: List[Dict[str, Any]] = cfg["curriculum"]
     total_epochs = sum(int(p["epochs"]) for p in phases)
 
-    fingerprint = recipe_fingerprint(cfg)
+    fingerprint = recipe_fingerprint(cfg, manifest)
     model_spec = {"task": "stage2", **cfg["model"]}
     model = build_model(model_spec).to(accel.device)
     strategy = cfg.get("imbalance", {}).get("strategy", "sampler")
@@ -419,8 +410,9 @@ def run_stage2_cv(
     mirror_dir: Optional[str | Path] = None,
     folds: Optional[List[int]] = None,
     accel: Optional[ColabTPUAccelerator] = None,
+    resume: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    """Train the requested folds (skipping finished ones).
+    """Train the requested folds (skipping finished ones unless `resume=False`).
 
     Aggregation (OOF + test ensemble) runs once *all* folds listed in `cfg["cv"]["folds"]`
     are finished, so `folds` can be a subset trained in one Colab session.
@@ -430,26 +422,28 @@ def run_stage2_cv(
     folds = list(folds or all_folds)
     accel = accel or ColabTPUAccelerator(prefer_tpu=False)
     mirror = Path(mirror_dir) if mirror_dir else None
-    fingerprint = recipe_fingerprint(cfg)
+    manifest = Path(data_root) / cfg["data"].get("manifest", "stage2_grading_splits.csv")
+    fingerprint = recipe_fingerprint(cfg, manifest)
     print(f"[stage2] recipe fingerprint {fingerprint}")
     for f in sorted(set(folds) | set(all_folds)):
+        skip_allowed = resume or (f not in folds)
         # Restore finished-fold artifacts from the mirror (e.g. Drive) after a new Colab session.
-        if mirror is not None and _is_done(mirror, f, fingerprint) and not _is_done(out_dir, f, fingerprint):
+        if skip_allowed and mirror is not None and _is_done(mirror, f, fingerprint) and not _is_done(out_dir, f, fingerprint):
             for name in (fold_ckpt_name(f), f"stage2_fold{f}_val_preds.npz", f"stage2_fold{f}_test_preds.npz",
                          f"stage2_fold{f}_metrics.json", f"stage2_fold{f}.done"):
                 if (mirror / name).exists():
                     mirror_to(mirror / name, out_dir)
-        if _is_done(out_dir, f, fingerprint):
+        if skip_allowed and _is_done(out_dir, f, fingerprint):
             if f in folds:
                 print(f"[stage2] fold {f} already finished - skipping")
             continue
         if f not in folds:
             continue
-        if _done_path(out_dir, f).exists() or (mirror is not None and _done_path(mirror, f).exists()):
+        if resume and (_done_path(out_dir, f).exists() or (mirror is not None and _done_path(mirror, f).exists())):
             print(f"[stage2] fold {f}: existing files are from a different training recipe - retraining")
-        if mirror is not None and (mirror / f"stage2_fold{f}_last.pt").exists() and not (out_dir / f"stage2_fold{f}_last.pt").exists():
+        if resume and mirror is not None and (mirror / f"stage2_fold{f}_last.pt").exists() and not (out_dir / f"stage2_fold{f}_last.pt").exists():
             mirror_to(mirror / f"stage2_fold{f}_last.pt", out_dir)
-        train_stage2_fold(cfg, f, data_root, out_dir, mirror_dir, accel)
+        train_stage2_fold(cfg, f, data_root, out_dir, mirror_dir, accel, resume=resume)
 
     if all(_is_done(out_dir, f, fingerprint) for f in all_folds):
         summary = aggregate_cv(out_dir, all_folds, mirror_dir)

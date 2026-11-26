@@ -77,7 +77,7 @@ def main(argv: List[str] | None = None) -> None:
         from src.training.stage2 import run_stage2_cv
 
         cfg = apply_overrides(load_yaml_config(args.config)["stage2_grading"], args.set)
-        run_stage2_cv(cfg, args.data_root, args.out, args.mirror, folds=args.folds)
+        run_stage2_cv(cfg, args.data_root, args.out, args.mirror, folds=args.folds, resume=not args.no_resume)
     elif args.cmd == "calibrate":
         from src.training.calibration import calibrate_from_files
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -146,6 +147,27 @@ class ModelEMA:
 
 
 # --------------------------------------------------------------------------- resumable state
+# Settings that may change between sessions without invalidating a run.
+_FINGERPRINT_IGNORE = {"training": ("amp", "num_workers")}
+
+
+def recipe_fingerprint(
+    cfg: Dict[str, Any],
+    manifest_path: Optional[str | Path] = None,
+    version: int = 1,
+) -> str:
+    """Short hash of the recipe (and manifest file, if given); mismatched states are never reused."""
+    c = copy.deepcopy(cfg)
+    for section, keys in _FINGERPRINT_IGNORE.items():
+        for k in keys:
+            c.get(section, {}).pop(k, None)
+    payload: Dict[str, Any] = {"v": version, "cfg": c}
+    if manifest_path is not None:
+        payload["manifest"] = hashlib.sha1(Path(manifest_path).read_bytes()).hexdigest()
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
 def save_training_state(path: Path, **state: Any) -> None:
     """Atomically save everything needed to resume after a Colab disconnect."""
     path.parent.mkdir(parents=True, exist_ok=True)

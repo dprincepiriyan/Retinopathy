@@ -27,6 +27,7 @@ from src.training.common import (
     make_loader,
     maybe_subsample,
     mirror_to,
+    recipe_fingerprint,
     save_training_state,
     set_lr,
     set_seed,
@@ -152,6 +153,7 @@ def train_stage1(
     warmup_steps = int(float(tcfg.get("warmup_epochs", 1)) * steps_per_epoch)
     min_factor = float(tcfg.get("min_lr_ratio", 0.01))
 
+    fingerprint = recipe_fingerprint(cfg, manifest)
     start_epoch, best_score, history = 1, -1.0, []
     last_path = out_dir / LAST_STATE_NAME
     if resume and mirror is not None and not last_path.exists():
@@ -159,7 +161,11 @@ def train_stage1(
         for name in (LAST_STATE_NAME, BEST_CKPT_NAME):
             if (mirror / name).exists():
                 mirror_to(mirror / name, out_dir)
-    if resume and (state := load_training_state(last_path)) is not None:
+    state = load_training_state(last_path) if resume else None
+    if state is not None and state.get("fingerprint") != fingerprint:
+        print(f"[stage1] ignoring {last_path.name}: it belongs to a different training recipe")
+        state = None
+    if state is not None:
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         if ema and state.get("ema"):
@@ -211,7 +217,10 @@ def train_stage1(
         improved = bool(np.isfinite(score) and score > best_score)
         if improved:
             best_score = float(score)
-            save_model_checkpoint(best_path, eval_model, spec, {"epoch": epoch, "val_metrics": vm, "val_fold": val_fold})
+            save_model_checkpoint(
+                best_path, eval_model, spec,
+                {"epoch": epoch, "val_metrics": vm, "val_fold": val_fold, "recipe_fingerprint": fingerprint},
+            )
             np.savez_compressed(
                 out_dir / "stage1_val_preds.npz",
                 probs=val["probs"], targets=val["targets"], masks=val["masks"],
@@ -230,6 +239,7 @@ def train_stage1(
             epoch=epoch,
             best_score=best_score,
             history=history,
+            fingerprint=fingerprint,
         )
         mirror_to(last_path, mirror)
         print(
