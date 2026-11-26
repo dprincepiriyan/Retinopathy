@@ -6,6 +6,7 @@ and falls back to a clean self-contained PDF 1.4 writer when running in minimal 
 """
 
 from pathlib import Path
+import textwrap
 from typing import Optional
 
 from src.tier5_reporting.findings_schema import BilateralPatientReport
@@ -21,17 +22,27 @@ class ClinicalPDFGenerator:
     @staticmethod
     def _build_minimal_pdf_bytes(lines: list[str]) -> bytes:
         """Generate a valid standalone PDF-1.4 document without external C libraries."""
-        escaped_lines = []
-        for line in lines[:48]:
-            clean = (
-                line.replace("\\", "\\\\")
-                .replace("(", "\\(")
-                .replace(")", "\\)")
-                .replace("—", "-")
+        max_lines = 52
+        wrapped: list[str] = []
+        for raw_line in lines:
+            ascii_line = (
+                raw_line.replace("—", "-")
                 .replace("–", "-")
+                .encode("ascii", errors="replace")
+                .decode("ascii")
             )
-            clean_ascii = clean.encode("ascii", errors="replace").decode("ascii")
-            escaped_lines.append(clean_ascii)
+            for sub in ascii_line.splitlines() or [""]:
+                wrapped.extend(textwrap.wrap(sub, width=95) or [""])
+
+        # shortcut: single-page fallback (max 52 lines), upgrade to multi-page or install WeasyPrint for longer notes
+        if len(wrapped) > max_lines:
+            wrapped = wrapped[: max_lines - 1] + ["... (truncated: install WeasyPrint for multi-page reports)"]
+
+        # Escape PDF string delimiters after wrapping so escapes are never split across lines.
+        escaped_lines = [
+            line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            for line in wrapped
+        ]
 
         content_ops = ["BT", "/F1 10 Tf", "45 790 Td", "14 TL"]
         for idx, text_line in enumerate(escaped_lines):
@@ -78,7 +89,7 @@ class ClinicalPDFGenerator:
             from weasyprint import HTML  # type: ignore
 
             return HTML(string=html_str, base_url=str(self.template_engine.templates_dir)).write_pdf()
-        except Exception:
+        except (ImportError, OSError):
             # Fallback to deterministic pure-Python PDF 1.4 generator if WeasyPrint/Pango isn't installed
             lines = [
                 f"RETINANET-PRO CLINICAL SCREENING REPORT ({report.pipeline_version})",

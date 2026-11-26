@@ -54,8 +54,18 @@ class BilateralClinicalAggregator:
         other_notes = [e.other_pathologies_note for e in available_eyes if e.other_pathologies_note]
         bilateral_other_summary = " | ".join(other_notes)
 
-        if not gradable_confident_eyes:
-            # Both eyes (or the only provided eye) abstained / ungradable
+        worse_eye_obj = (
+            max(
+                gradable_confident_eyes,
+                key=lambda e: (int(e.displayed_dr_grade or 0), e.continuous_severity_score, e.prob_referable_dr),
+            )
+            if gradable_confident_eyes
+            else None
+        )
+        worse_grade = int(worse_eye_obj.displayed_dr_grade or 0) if worse_eye_obj is not None else -1
+
+        # An abstained eye could hide severe DR; only a confirmed Grade 4 (<48h) outranks manual review.
+        if worse_eye_obj is None or (any_abstained and worse_grade < 4):
             rule = REFERRAL_RULES["abstain"]
             return BilateralPatientReport(
                 patient_id=patient_id,
@@ -78,13 +88,6 @@ class BilateralClinicalAggregator:
                 doctor_verification_notes=doctor_verification_notes,
                 doctor_signature=doctor_signature,
             )
-
-        # Determine the worse eye among gradable confident eyes
-        worse_eye_obj = max(
-            gradable_confident_eyes,
-            key=lambda e: (int(e.displayed_dr_grade or 0), e.continuous_severity_score, e.prob_referable_dr),
-        )
-        worse_grade = int(worse_eye_obj.displayed_dr_grade or 0)
 
         if (
             len(gradable_confident_eyes) == 2

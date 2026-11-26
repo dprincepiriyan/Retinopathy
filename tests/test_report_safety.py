@@ -147,3 +147,98 @@ def test_onh_vcdr_and_isnt_computation() -> None:
     assert 0.65 <= bio.vcdr <= 0.75
     assert bio.isnt_rule_violated is True
     assert bio.glaucoma_biometric_risk_score > 0.70
+
+
+def _make_eye(laterality: str, grade: int, abstain: bool = False, gradable: bool = True) -> EyeClinicalFindings:
+    return EyeClinicalFindings(
+        laterality=laterality,
+        is_gradable=gradable,
+        iqa_quality_score=0.9 if gradable else 0.1,
+        prob_dr=0.9 if grade >= 2 else 0.1,
+        prob_glaucoma=0.1,
+        prob_cataract=0.1,
+        raw_primary_dr_grade=grade if gradable else -1,
+        conservative_dr_grade=grade if gradable else -1,
+        continuous_severity_score=float(grade) if gradable else 0.0,
+        prob_referable_dr=0.9 if grade >= 2 else 0.05,
+        conformal_prediction_set=[2, 3, 4] if (abstain and gradable) else ([] if not gradable else [grade]),
+        confidence_tier="LOW_ABSTAIN" if (abstain or not gradable) else "HIGH",
+        abstain_flag=abstain or not gradable,
+        ensemble_std=0.05,
+    )
+
+
+def test_bilateral_partial_abstention_safety() -> None:
+    agg = BilateralClinicalAggregator()
+
+    # Right eye abstained with possible severe DR, left eye confident Grade 0 -> must not return routine 12m green
+    report = agg.aggregate("PT-ABST-1", _make_eye("OD", 4, abstain=True), _make_eye("OS", 0))
+    assert report.patient_overall_dr_grade is None
+    assert report.requires_human_review is True
+    assert report.is_referable_dr is True
+    assert report.overall_confidence_tier == "LOW_ABSTAIN"
+    assert report.referral_timeline == "Immediate Recapture or Manual Triage"
+    assert report.badge_color == "gray"
+    assert "annual" not in report.recommended_clinical_action.lower()
+
+    # Confirmed Grade 4 emergency (<48h) still outranks generic recapture when the other eye is ungradable
+    emerg = agg.aggregate("PT-ABST-2", _make_eye("OD", 4), _make_eye("OS", 0, gradable=False))
+    assert emerg.patient_overall_dr_grade == 4
+    assert emerg.referral_timeline == "< 48 Hours"
+    assert emerg.badge_color == "red"
+    assert emerg.requires_human_review is True
+    assert emerg.overall_confidence_tier == "LOW_ABSTAIN"
+
+
+def test_fallback_pdf_wraps_marks_truncation_and_surfaces_weasyprint_errors(monkeypatch) -> None:
+    import sys
+    import types
+    import pytest
+
+    agg = BilateralClinicalAggregator()
+    pdf_gen = ClinicalPDFGenerator()
+
+    # Grade 4 action (>130 chars, with parens) + multi-line doctor notes must wrap cleanly without losing text
+    report = agg.aggregate(
+        "PT-PDF-1",
+        _make_eye("OD", 4),
+        _make_eye("OS", 0),
+        doctor_verification_notes="Line 1: urgent PRP\nLine 2: confirm macula OCT",
+        doctor_signature="Dr. Test",
+    )
+    pdf_bytes = pdf_gen._build_minimal_pdf_bytes(
+        [
+            f"Clinical Action    : {report.recommended_clinical_action}",
+            f"Doctor Notes: {report.doctor_verification_notes}",
+            f"Signed By   : {report.doctor_signature}",
+        ]
+    )
+    assert pdf_bytes.startswith(b"%PDF-1.4")
+    assert b"anti-VEGF therapy." in pdf_bytes
+    assert b"Line 2: confirm macula OCT" in pdf_bytes
+    # Every Tj text operator line stays within 95 visible chars
+    text_lines = [ln for ln in pdf_bytes.decode("ascii").splitlines() if ln.endswith(") Tj")]
+    assert len(text_lines) >= 5
+    for ln in text_lines:
+        raw = ln[ln.index("(") + 1 : ln.rindex(")")]
+        unescaped = raw.replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\")
+        assert len(unescaped) <= 95
+
+    # Overflow past single-page cap emits an explicit truncation notice instead of silent drop
+    long_pdf = pdf_gen._build_minimal_pdf_bytes([f"Line {i}" for i in range(60)])
+    assert b"truncated" in long_pdf
+
+    # Real WeasyPrint errors (not ImportError/OSError) must surface instead of silently falling back
+    fake_wp = types.ModuleType("weasyprint")
+
+    class _BrokenHTML:
+        def __init__(self, **_kwargs):
+            pass
+
+        def write_pdf(self):
+            raise RuntimeError("weasyprint layout bug")
+
+    fake_wp.HTML = _BrokenHTML
+    monkeypatch.setitem(sys.modules, "weasyprint", fake_wp)
+    with pytest.raises(RuntimeError, match="weasyprint layout bug"):
+        pdf_gen.generate_pdf_bytes(report)
