@@ -18,7 +18,6 @@ The system operates across a **6-Tier Modular Pipeline (Tiers 0–5)**:
 2. **Tier 1: Domain Harmonization & Micro-Lesion Preservation**
    - **Fourier Domain Adaptation (FDA):** Generator-free, low-frequency amplitude style alignment (<5ms latency, zero lesion hallucination risk).
    - **Residual Attention U-Net CDAE:** Predicts noise residuals ($\hat{x} = x + lpha \cdot \Delta x$) to preserve microaneurysms (<10px) while removing sensor/Poisson noise.
-   - **Lesion-Locked CUT/CycleGAN:** High-pass structural lock used for training-time domain augmentation.
 
 3. **Tier 2: Stage-1 Multi-Label Disease Triage & Glaucoma ONH Engine**
    - Multi-label binary classification (independent Sigmoids for **Diabetic Retinopathy**, **Glaucoma**, and **Cataract**).
@@ -32,8 +31,8 @@ The system operates across a **6-Tier Modular Pipeline (Tiers 0–5)**:
    - **Generalized Mean (GeM) Pooling:** Learnable $-norm pooling preventing tiny focal microaneurysms from being washed out.
    - **Tri-Head Diagnostic Layer:** CORAL/CORN ordinal logits (Grades 0–4), binary referable DR head (Grade $\ge$ 2), and continuous severity regressor.
 
-5. **Tier 4: Meta-Ensembling, Calibration & Explainability**
-   - Out-of-fold stacking meta-learner (LightGBM/Ridge) + 8-view Dihedral Test-Time Augmentation (TTA).
+5. **Tier 4: Ensembling, Calibration & Explainability**
+   - 4-fold cross-validation ensemble + optional 8-view Dihedral Test-Time Augmentation (TTA).
    - Temperature scaling and Split Conformal Prediction (target 95% coverage predictive sets, measured on the test ensemble in `test_report.conformal_coverage`).
    - Dual Explainability: High-resolution **Grad-CAM++** for micro-lesions + **Cross-Attention Rollout** for quadrant-level involvement.
 
@@ -65,12 +64,14 @@ Key properties:
 - **Calibration without double-dipping:** thresholds on all OOF, temperature on OOF half A, conformal on OOF half B, and everything reported on the test split with bootstrap CIs.
 - **Inference parity & safety:** inference resizes exactly like the training-data writer, checkpoints load with `strict=True`, untrained modules (CDAE denoiser, ONH disc/cup U-Net) are never applied, temperature + thresholds are used at inference, and Grad-CAM++ uses real gradients. Saliency regions are not labelled as specific lesions unless a lesion-supervised model is used.
 
-Quick local smoke run (CPU, tiny):
+Quick local setup, smoke run (CPU, tiny), and dashboard:
 
 ```bash
+pip install -e ".[dev,full]"
 python -m src.training.cli stage1 --out /tmp/smoke --set model.backbone_name=efficientnet_b0 model.pretrained=false \
     data.resolution=128 data.max_train_samples=64 data.max_eval_samples=48 training.epochs=1 training.num_workers=0
 pytest tests -q
+streamlit run app/dashboard.py
 ```
 
 ### Known limitations / next steps
