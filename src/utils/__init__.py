@@ -1,6 +1,6 @@
 """Utility modules for configuration, quality gating, and clinical metrics."""
 
-from src.utils.config import load_all_configs, load_yaml_config
+from src.utils.config import load_yaml_config
 from src.utils.iqa_gatekeeper import IQAGatekeeper, IQAResult
 from src.utils.metrics import (
     compute_clinical_metrics,
@@ -11,7 +11,6 @@ from src.utils.metrics import (
 
 __all__ = [
     "load_yaml_config",
-    "load_all_configs",
     "IQAGatekeeper",
     "IQAResult",
     "quadratic_weighted_kappa",
