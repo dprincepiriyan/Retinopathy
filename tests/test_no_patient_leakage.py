@@ -14,7 +14,7 @@ from src.data.datasets import (
 )
 
 
-def test_perceptual_hash_deduplication_catches_near_duplicates() -> None:
+def test_perceptual_hash_deduplication_catches_near_duplicates(tmp_path) -> None:
     img_a = generate_synthetic_fundus_image(size=256, laterality="OD", num_microaneurysms=5, seed=101)
     # Near-duplicate: minor brightness shift (+2)
     img_a_dup = np.clip(img_a.astype(np.int32) + 2, 0, 255).astype(np.uint8)
@@ -30,15 +30,45 @@ def test_perceptual_hash_deduplication_catches_near_duplicates() -> None:
     assert hamming_distance_64bit(hash_a, hash_a_dup) <= 2
     assert hamming_distance_64bit(hash_a, hash_b) > 4
 
+    kept_file = tmp_path / "scan_1.jpg"
+    dup_file = tmp_path / "scan_1_copy.jpg"
+    kept_file.write_bytes(b"a")
+    dup_file.write_bytes(b"b")
+
     records = [
-        RetinalDatasetRecord(image_id="scan_1", patient_id="P1", laterality="OD", dr_grade=1, phash=hash_a),
-        RetinalDatasetRecord(image_id="scan_1_copy", patient_id="P99", laterality="OD", dr_grade=1, phash=hash_a_dup),
+        RetinalDatasetRecord(
+            image_id="scan_1", patient_id="P1", laterality="OD", dr_grade=1, glaucoma=1,
+            image_path=str(kept_file), phash=hash_a,
+        ),
+        RetinalDatasetRecord(
+            image_id="scan_1_copy", patient_id="P99", laterality="OD", dr_grade=2, cataract=1,
+            image_path=str(dup_file), phash=hash_a_dup,
+        ),
         RetinalDatasetRecord(image_id="scan_2", patient_id="P2", laterality="OS", dr_grade=3, phash=hash_b),
     ]
-    unique, removed = deduplicate_records_by_phash(records, max_hamming_distance=4)
+    unique, removed = deduplicate_records_by_phash(records, delete_duplicate_files=True)
     assert len(unique) == 2
     assert len(removed) == 1
     assert removed[0].image_id == "scan_1_copy"
+    # Comorbidity labels merge onto kept record; duplicate file is removed on disk
+    assert (unique[0].dr_grade, unique[0].glaucoma, unique[0].cataract) == (2, 1, 1)
+    assert kept_file.exists() and not dup_file.exists()
+
+    # Default 2-bit rule keeps 3-bit-distant hashes separate (incl. high-bit uint64 values)
+    hi = (1 << 63) | 0b10101
+    p1, p2 = tmp_path / "d1.jpg", tmp_path / "d2.jpg"
+    p1.write_bytes(b"1")
+    p2.write_bytes(b"2")
+    dict_rows = [
+        {"image_id": "a", "phash": hi, "dr_grade": 0, "glaucoma": 1, "cataract": 0, "path_512": str(p1), "path_768": ""},
+        {"image_id": "b", "phash": hi ^ 0b11, "dr_grade": 0, "glaucoma": 0, "cataract": 1, "path_512": str(p2), "path_768": ""},
+        {"image_id": "c", "phash": hi ^ 0b111, "dr_grade": 0, "glaucoma": 0, "cataract": 0, "path_512": "", "path_768": ""},
+    ]
+    u_rows, r_rows = deduplicate_records_by_phash(dict_rows, delete_duplicate_files=True)
+    assert [r["image_id"] for r in u_rows] == ["a", "c"]
+    assert [r["image_id"] for r in r_rows] == ["b"]
+    assert (u_rows[0]["glaucoma"], u_rows[0]["cataract"]) == (1, 1)
+    assert p1.exists() and not p2.exists()
 
 
 def test_zero_patient_overlap_and_no_augmented_test_leakage() -> None:
@@ -131,5 +161,6 @@ def test_dataset_cleaning_pipeline_end_to_end(tmp_path) -> None:
     assert summary.rejected_by_iqa == 1
     assert summary.duplicates_removed == 1
     assert summary.clean_unique_gradable == 6
+    assert len(list((out_dir / "images_512").glob("*.png"))) == 6
     assert summary.manifest_csv_path.exists()
 

@@ -30,7 +30,6 @@ from src.data.datasets import (
     compute_perceptual_hash,
     create_patient_stratified_splits,
     deduplicate_records_by_phash,
-    hamming_distance_64bit,
 )
 from src.data.preprocessing import (
     Tier0Preprocessor,
@@ -62,7 +61,7 @@ class DatasetCleaningPipeline:
         self,
         stage1_size: int = 512,
         stage2_size: int = 768,
-        phash_max_hamming: int = 4,
+        phash_max_hamming: int = 2,
         n_splits: int = 5,
     ) -> None:
         self.iqa_gate = IQAGatekeeper()
@@ -229,7 +228,9 @@ class DatasetCleaningPipeline:
 
         # Deduplicate via 64-bit pHash
         unique_records, removed_dups = deduplicate_records_by_phash(
-            gradable_records, max_hamming_distance=self.phash_max_hamming
+            gradable_records,
+            max_hamming_distance=self.phash_max_hamming,
+            delete_duplicate_files=save_preprocessed_images,
         )
 
         # Split by patient_id if enough samples exist for n_splits
@@ -564,42 +565,14 @@ def run_multi_zip_curation_and_preprocessing(
     kept_rows = [r for r in all_results if r["status"] == "GRADABLE_KEPT"]
 
     # 2. Deduplicate via 64-bit pHash & merge multi-label records when identical scan has multiple labels
-    unique_rows: List[Dict[str, Any]] = []
-    duplicate_rows: List[Dict[str, Any]] = []
-    multi_label_merged_count = 0
-
-    for row in kept_rows:
-        ph = row["phash"]
-        matched_existing = None
-        for kept in unique_rows:
-            if hamming_distance_64bit(ph, kept["phash"]) <= 2:
-                matched_existing = kept
-                break
-        if matched_existing is not None:
-            # Check if this is a multi-label comorbidity scan in Stage 1 (e.g. Cataract + Glaucoma)
-            before_flags = (
-                matched_existing["dr_grade"],
-                matched_existing["glaucoma"],
-                matched_existing["cataract"],
-            )
-            matched_existing["dr_grade"] = max(matched_existing["dr_grade"], row["dr_grade"])
-            matched_existing["glaucoma"] = max(matched_existing["glaucoma"], row["glaucoma"])
-            matched_existing["cataract"] = max(matched_existing["cataract"], row["cataract"])
-            after_flags = (
-                matched_existing["dr_grade"],
-                matched_existing["glaucoma"],
-                matched_existing["cataract"],
-            )
-            if before_flags != after_flags:
-                multi_label_merged_count += 1
-            # Remove redundant duplicate image file on disk
-            for p_key in ("path_512", "path_768"):
-                p_str = row.get(p_key, "")
-                if p_str and Path(p_str).exists() and p_str != matched_existing.get(p_key, ""):
-                    Path(p_str).unlink(missing_ok=True)
-            duplicate_rows.append(row)
-        else:
-            unique_rows.append(row)
+    initial_labels = {id(r): (r["dr_grade"], r["glaucoma"], r["cataract"]) for r in kept_rows}
+    unique_rows, duplicate_rows = deduplicate_records_by_phash(
+        kept_rows, max_hamming_distance=2, delete_duplicate_files=True
+    )
+    multi_label_merged_count = sum(
+        (r["dr_grade"], r["glaucoma"], r["cataract"]) != initial_labels[id(r)]
+        for r in unique_rows
+    )
 
     # 3. Convert to RetinalDatasetRecord and run StratifiedGroupKFold (5 folds) separately for Stage 1 & Stage 2
     def _split_stage_rows(rows: List[Dict[str, Any]], stratify_mode: str) -> List[Dict[str, Any]]:

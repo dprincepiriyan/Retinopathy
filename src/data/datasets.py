@@ -8,6 +8,7 @@ Addresses Bottleneck 7 from the forensic paper audit:
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
@@ -105,35 +106,71 @@ def hamming_distance_64bit(hash_a: int, hash_b: int) -> int:
     return int(bin(hash_a ^ hash_b).count("1"))
 
 
+_POPCOUNT_LUT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+
+
+def _field_get(item, key: str, default=None):
+    return item.get(key, default) if isinstance(item, dict) else getattr(item, key, default)
+
+
+def _field_set(item, key: str, value) -> None:
+    if isinstance(item, dict):
+        item[key] = value
+    else:
+        setattr(item, key, value)
+
+
 def deduplicate_records_by_phash(
-    records: List[RetinalDatasetRecord],
-    max_hamming_distance: int = 4,
-) -> Tuple[List[RetinalDatasetRecord], List[RetinalDatasetRecord]]:
-    """Deduplicate dataset records using 64-bit perceptual hashes.
+    records: List,
+    max_hamming_distance: int = 2,
+    delete_duplicate_files: bool = False,
+) -> Tuple[List, List]:
+    """Deduplicate records (`RetinalDatasetRecord` or `dict`) by 64-bit pHash.
 
-    Args:
-        records: Input list of RetinalDatasetRecord (each must have `phash` populated).
-        max_hamming_distance: Maximum Hamming distance to consider two scans near-duplicates.
-
-    Returns:
-        Tuple of (clean_unique_records, removed_duplicate_records).
+    Uses a vectorized NumPy XOR + byte popcount pass over kept hashes. Matches
+    within `max_hamming_distance` bits merge comorbidity labels (max of
+    `dr_grade`, `glaucoma`, `cataract`) onto the kept record and, when
+    `delete_duplicate_files=True`, remove redundant duplicate files on disk
+    (`image_path`, `path_512`, `path_768`).
     """
-    unique_records: List[RetinalDatasetRecord] = []
-    removed_duplicates: List[RetinalDatasetRecord] = []
+    unique_records: List = []
+    removed_duplicates: List = []
+    kept_hashes = np.empty(len(records), dtype=np.uint64)
+    kept_indices = np.empty(len(records), dtype=np.int64)
+    n_kept = 0
 
     for rec in records:
-        if rec.phash is None:
+        ph = _field_get(rec, "phash")
+        if ph is None:
             unique_records.append(rec)
             continue
-        is_dup = False
-        for kept in unique_records:
-            if kept.phash is not None:
-                if hamming_distance_64bit(rec.phash, kept.phash) <= max_hamming_distance:
-                    is_dup = True
-                    break
-        if is_dup:
+
+        ph_u64 = np.uint64(int(ph))
+        matched = None
+        if n_kept:
+            xor = kept_hashes[:n_kept] ^ ph_u64
+            dists = _POPCOUNT_LUT[xor.view(np.uint8).reshape(-1, 8)].sum(axis=1)
+            hits = np.flatnonzero(dists <= max_hamming_distance)
+            if hits.size:
+                matched = unique_records[int(kept_indices[hits[0]])]
+
+        if matched is not None:
+            for field_name in ("dr_grade", "glaucoma", "cataract"):
+                _field_set(
+                    matched,
+                    field_name,
+                    max(_field_get(matched, field_name, 0), _field_get(rec, field_name, 0)),
+                )
+            if delete_duplicate_files:
+                for p_key in ("image_path", "path_512", "path_768"):
+                    p_str = _field_get(rec, p_key, "")
+                    if p_str and p_str != _field_get(matched, p_key, ""):
+                        Path(p_str).unlink(missing_ok=True)
             removed_duplicates.append(rec)
         else:
+            kept_hashes[n_kept] = ph_u64
+            kept_indices[n_kept] = len(unique_records)
+            n_kept += 1
             unique_records.append(rec)
 
     return unique_records, removed_duplicates
