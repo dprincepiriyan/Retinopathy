@@ -430,3 +430,22 @@ def test_stage1_ignores_resume_state_on_config_or_manifest_change(tmp_path) -> N
     cfg_changed = {**cfg, "training": {**cfg["training"], "epochs": 2}}
     summary2 = train_stage1(cfg_changed, tmp_path, out, resume=True)
     assert [h["epoch"] for h in summary2["history"]] == [1, 2]
+
+
+def test_stage1_combined_manifest_is_rebuilt_not_reused(tmp_path) -> None:
+    from src.data.stage1_manifest import ensure_stage1_combined_manifest
+
+    fields = ["image_id", "patient_id", "split", "fold", "source_dataset", "dr_grade"]
+    for name, src in (("stage1_triage_splits.csv", "odir_s1"), ("stage2_grading_splits.csv", "aptos2019_highres")):
+        with open(tmp_path / name, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            w.writerow({"image_id": f"{src}_1", "patient_id": f"{src}_p1", "split": "train_val", "fold": 1,
+                        "source_dataset": src, "dr_grade": 0})
+
+    def n_rows(path):
+        with open(path) as f:
+            return sum(1 for _ in csv.DictReader(f))
+
+    assert n_rows(ensure_stage1_combined_manifest(tmp_path, include_aptos=True)) == 2
+    assert n_rows(ensure_stage1_combined_manifest(tmp_path, include_aptos=False)) == 1  # setting change is honoured

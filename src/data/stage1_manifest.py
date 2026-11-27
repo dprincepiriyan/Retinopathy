@@ -98,14 +98,13 @@ def build_stage1_combined_manifest(
 
 
 def ensure_stage1_combined_manifest(data_root: str | Path, include_aptos: bool = True) -> Path:
-    """Return the combined manifest path inside `data_root`, building it if missing."""
+    """Rebuild the combined manifest inside `data_root` (deterministic, <1 s) and return its path."""
     root = Path(data_root)
     out = root / COMBINED_MANIFEST_NAME
-    if not out.exists():
-        build_stage1_combined_manifest(
-            root / "stage1_triage_splits.csv",
-            root / "stage2_grading_splits.csv",
-            out,
-            include_aptos=include_aptos,
-        )
+    build_stage1_combined_manifest(
+        root / "stage1_triage_splits.csv",
+        root / "stage2_grading_splits.csv",
+        out,
+        include_aptos=include_aptos,
+    )
     return out

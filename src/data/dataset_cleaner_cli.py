@@ -1,26 +1,22 @@
-"""End-to-End Dataset Cleaning, IQA Filtering, pHash Deduplication & TPU Shard Preprocessor.
+"""Dataset curation for RetinaNet-Pro: the `--zip-dir` path that built `data/processed`.
 
-Designed to process any raw retinal dataset provided by the user:
-- Supports folder-per-class layouts (e.g., `0/`, `1/`, `2/`, `3/`, `4/` or `DR/`, `Glaucoma/`, `Cataract/`, `Normal/`)
-- Supports CSV + image directory layouts (EyePACS, APTOS 2019, Messidor-2, IDRiD, ODIR-5K)
-- Executes:
-  1. Corrupt file & Tier-0 IQA Gatekeeper filtering (logs rejected blurry/glare scans to CSV).
-  2. 64-bit DCT Perceptual Hash (pHash) cross-dataset deduplication.
-  3. Zero-leakage Stratified Group 5-Fold splitting by `patient_id`.
-  4. Circular FOV 1:1 aspect-preserving crop + Green/LAB CLAHE preprocessing.
-  5. Exports static-shape compressed `.npz` shards ready for zero-recompilation Colab TPU training.
+Reads the raw dataset-*.zip archives and:
+  1. Drops corrupt files and scans rejected by the Tier-0 IQA gatekeeper.
+  2. Removes cross-dataset duplicates with a 64-bit DCT perceptual hash (pHash).
+  3. Splits by `patient_id` with stratified group folds (no patient leakage).
+  4. Crops the circular FOV and applies Green/LAB CLAHE, saving 512/768 px JPEGs
+     (INTER_AREA, quality 96: the same pixels the inference pipeline produces).
 """
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 import csv
-from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 import zipfile
 import cv2
 import numpy as np
@@ -32,7 +28,6 @@ from src.data.datasets import (
     deduplicate_records_by_phash,
 )
 from src.data.preprocessing import (
-    Tier0Preprocessor,
     detect_and_crop_circular_fov,
     green_lab_clahe,
 )
@@ -40,263 +35,35 @@ from src.tier1_purifiers.fda import FourierDomainAdapter
 from src.utils.iqa_gatekeeper import IQAGatekeeper
 
 
-@dataclass
-class CleaningSummary:
-    """Summary statistics from running the dataset cleaning & preprocessing pipeline."""
+def infer_patient_and_laterality(stem: str) -> Tuple[str, str]:
+    """Extract patient_id and OD/OS laterality from common retinal dataset filenames.
 
-    total_scanned: int
-    corrupt_or_unreadable: int
-    rejected_by_iqa: int
-    duplicates_removed: int
-    clean_unique_gradable: int
-    train_val_count: int
-    test_count: int
-    manifest_csv_path: Path
-
-
-class DatasetCleaningPipeline:
-    """Automated dataset cleaner, deduplicator, and TPU tensor preprocessor."""
-
-    def __init__(
-        self,
-        stage1_size: int = 512,
-        stage2_size: int = 768,
-        phash_max_hamming: int = 2,
-        n_splits: int = 5,
-    ) -> None:
-        self.iqa_gate = IQAGatekeeper()
-        self.preprocessor = Tier0Preprocessor(
-            stage1_size=stage1_size, stage2_size=stage2_size
+    Examples:
+    - EyePACS `10_left` -> patient_id=`10`, laterality=`OS`
+    - EyePACS `10_right` -> patient_id=`10`, laterality=`OD`
+    - ODIR `124_left.jpg` -> patient_id=`124`, laterality=`OS`
+    - Generic `img005` -> patient_id=`img005`, laterality=`OD`
+    """
+    lower = stem.lower()
+    if lower.endswith("_left") or "_os" in lower or "-left" in lower:
+        pid = (
+            stem.replace("_left", "")
+            .replace("_LEFT", "")
+            .replace("-left", "")
+            .replace("_os", "")
+            .replace("_OS", "")
         )
-        self.phash_max_hamming = phash_max_hamming
-        self.n_splits = n_splits
-
-    @staticmethod
-    def infer_patient_and_laterality(stem: str) -> Tuple[str, str]:
-        """Extract patient_id and OD/OS laterality from common retinal dataset filenames.
-
-        Examples:
-        - EyePACS `10_left` -> patient_id=`10`, laterality=`OS`
-        - EyePACS `10_right` -> patient_id=`10`, laterality=`OD`
-        - ODIR `124_left.jpg` -> patient_id=`124`, laterality=`OS`
-        - Generic `img005` -> patient_id=`img005`, laterality=`OD`
-        """
-        lower = stem.lower()
-        if lower.endswith("_left") or "_os" in lower or "-left" in lower:
-            pid = (
-                stem.replace("_left", "")
-                .replace("_LEFT", "")
-                .replace("-left", "")
-                .replace("_os", "")
-                .replace("_OS", "")
-            )
-            return pid or stem, "OS"
-        if lower.endswith("_right") or "_od" in lower or "-right" in lower:
-            pid = (
-                stem.replace("_right", "")
-                .replace("_RIGHT", "")
-                .replace("-right", "")
-                .replace("_od", "")
-                .replace("_OD", "")
-            )
-            return pid or stem, "OD"
-        return stem, "OD"
-
-    def discover_folder_dataset(
-        self,
-        root_dir: str | Path,
-        source_name: str = "custom_folder",
-    ) -> List[RetinalDatasetRecord]:
-        """Discover images organized in class subfolders (e.g., 0..4 or pathology names)."""
-        root = Path(root_dir)
-        if not root.exists():
-            raise FileNotFoundError(f"Dataset directory not found: {root}")
-
-        valid_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-        records: List[RetinalDatasetRecord] = []
-
-        for img_path in sorted(root.rglob("*")):
-            if not img_path.is_file() or img_path.suffix.lower() not in valid_exts:
-                continue
-            parent_name = img_path.parent.name.lower()
-            dr_grade = 0
-            glaucoma = 0
-            cataract = 0
-
-            if parent_name in {"0", "1", "2", "3", "4"}:
-                dr_grade = int(parent_name)
-            elif "proliferative" in parent_name or "pdr" in parent_name:
-                dr_grade = 4
-            elif "severe" in parent_name:
-                dr_grade = 3
-            elif "moderate" in parent_name:
-                dr_grade = 2
-            elif "mild" in parent_name:
-                dr_grade = 1
-            elif "dr" in parent_name or "retinopathy" in parent_name:
-                dr_grade = 2
-            elif "glaucoma" in parent_name:
-                glaucoma = 1
-            elif "cataract" in parent_name:
-                cataract = 1
-
-            pid, lat = self.infer_patient_and_laterality(img_path.stem)
-            records.append(
-                RetinalDatasetRecord(
-                    image_id=img_path.stem,
-                    patient_id=f"{source_name}_{pid}",
-                    laterality=lat,
-                    dr_grade=dr_grade,
-                    glaucoma=glaucoma,
-                    cataract=cataract,
-                    source_dataset=source_name,
-                    image_path=str(img_path.resolve()),
-                )
-            )
-        return records
-
-    def clean_and_split_records(
-        self,
-        raw_records: List[RetinalDatasetRecord],
-        output_dir: str | Path,
-        save_preprocessed_images: bool = True,
-    ) -> Tuple[CleaningSummary, Dict[str, List[RetinalDatasetRecord]]]:
-        """Run full Tier-0 IQA gatekeeper, pHash deduplication, and patient-level StratifiedGroupKFold."""
-        out_root = Path(output_dir)
-        out_root.mkdir(parents=True, exist_ok=True)
-        clean_img_dir = out_root / "images_512"
-        if save_preprocessed_images:
-            clean_img_dir.mkdir(parents=True, exist_ok=True)
-
-        corrupt_count = 0
-        iqa_rejected_count = 0
-        gradable_records: List[RetinalDatasetRecord] = []
-        audit_rows: List[Dict[str, str | int | float]] = []
-
-        for rec in raw_records:
-            img_bgr = cv2.imread(rec.image_path)
-            if img_bgr is None:
-                corrupt_count += 1
-                audit_rows.append(
-                    {
-                        "image_id": rec.image_id,
-                        "patient_id": rec.patient_id,
-                        "status": "CORRUPT_UNREADABLE",
-                        "quality_score": 0.0,
-                        "reasons": "cv2.imread returned None",
-                    }
-                )
-                continue
-
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            prep = self.preprocessor(img_rgb)
-            iqa = self.iqa_gate.evaluate(prep.cropped_rgb, prep.fov_mask)
-
-            if not iqa.is_gradable:
-                iqa_rejected_count += 1
-                audit_rows.append(
-                    {
-                        "image_id": rec.image_id,
-                        "patient_id": rec.patient_id,
-                        "status": "REJECTED_IQA",
-                        "quality_score": iqa.quality_score,
-                        "reasons": "; ".join(iqa.rejection_reasons),
-                    }
-                )
-                continue
-
-            rec.phash = compute_perceptual_hash(prep.cropped_rgb)
-            if save_preprocessed_images:
-                save_path = clean_img_dir / f"{rec.source_dataset}_{rec.image_id}.png"
-                img_512_bgr = cv2.cvtColor(
-                    cv2.resize(prep.enhanced_rgb, (self.preprocessor.stage1_size, self.preprocessor.stage1_size)),
-                    cv2.COLOR_RGB2BGR,
-                )
-                cv2.imwrite(str(save_path), img_512_bgr)
-                rec.image_path = str(save_path)
-
-            gradable_records.append(rec)
-            audit_rows.append(
-                {
-                    "image_id": rec.image_id,
-                    "patient_id": rec.patient_id,
-                    "status": "GRADABLE_KEPT",
-                    "quality_score": iqa.quality_score,
-                    "reasons": "Passed Tier-0 IQA",
-                }
-            )
-
-        # Deduplicate via 64-bit pHash
-        unique_records, removed_dups = deduplicate_records_by_phash(
-            gradable_records,
-            max_hamming_distance=self.phash_max_hamming,
-            delete_duplicate_files=save_preprocessed_images,
+        return pid or stem, "OS"
+    if lower.endswith("_right") or "_od" in lower or "-right" in lower:
+        pid = (
+            stem.replace("_right", "")
+            .replace("_RIGHT", "")
+            .replace("-right", "")
+            .replace("_od", "")
+            .replace("_OD", "")
         )
-
-        # Split by patient_id if enough samples exist for n_splits
-        effective_splits = min(self.n_splits, len({r.patient_id for r in unique_records}))
-        if effective_splits >= 2 and len(unique_records) >= effective_splits:
-            splits = create_patient_stratified_splits(
-                unique_records, n_splits=effective_splits, test_fold=0
-            )
-        else:
-            splits = {"train_val": unique_records, "test": [], "augmented_train_only": []}
-
-        manifest_path = out_root / "clean_dedup_splits.csv"
-        with open(manifest_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "image_id",
-                    "patient_id",
-                    "laterality",
-                    "dr_grade",
-                    "glaucoma",
-                    "cataract",
-                    "source_dataset",
-                    "fold",
-                    "split",
-                    "phash",
-                    "image_path",
-                ]
-            )
-            for split_name, split_list in [("train_val", splits["train_val"]), ("test", splits["test"])]:
-                for r in split_list:
-                    writer.writerow(
-                        [
-                            r.image_id,
-                            r.patient_id,
-                            r.laterality,
-                            r.dr_grade,
-                            r.glaucoma,
-                            r.cataract,
-                            r.source_dataset,
-                            r.fold,
-                            split_name,
-                            r.phash,
-                            r.image_path,
-                        ]
-                    )
-
-        audit_path = out_root / "cleaning_audit_report.csv"
-        with open(audit_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(
-                f, fieldnames=["image_id", "patient_id", "status", "quality_score", "reasons"]
-            )
-            writer.writeheader()
-            writer.writerows(audit_rows)
-
-        summary = CleaningSummary(
-            total_scanned=len(raw_records),
-            corrupt_or_unreadable=corrupt_count,
-            rejected_by_iqa=iqa_rejected_count,
-            duplicates_removed=len(removed_dups),
-            clean_unique_gradable=len(unique_records),
-            train_val_count=len(splits["train_val"]),
-            test_count=len(splits["test"]),
-            manifest_csv_path=manifest_path,
-        )
-        return summary, splits
+        return pid or stem, "OD"
+    return stem, "OD"
 
 
 def _iqa_sidecar_path(path_512: str) -> Path:
@@ -312,11 +79,11 @@ def _write_iqa_sidecar(path_512: str, quality_score: float) -> None:
         pass
 
 
-def _read_iqa_sidecar(path_512: str) -> Tuple[str, str]:
+def _read_iqa_sidecar(path_512: str) -> Tuple[float | str, str]:
     """Return (quality_score, reason) for a cached image; empty score if never recorded."""
     try:
         with open(_iqa_sidecar_path(path_512), "r", encoding="utf-8") as f:
-            return str(round(float(json.load(f)["quality_score"]), 4)), "Passed Tier-0 IQA (cached)"
+            return round(float(json.load(f)["quality_score"]), 4), "Passed Tier-0 IQA (cached)"
     except (OSError, ValueError, KeyError):
         return "", "Passed Tier-0 IQA earlier (cached; score not recorded)"
 
@@ -494,7 +261,7 @@ def run_multi_zip_curation_and_preprocessing(
                 cataract = 1 if "cataract" in cls_folder else 0
                 # Distinguish EyePACS (.jpeg in diabetic_retinopathy) vs ODIR (.jpg/.png in cataract/glaucoma/normal)
                 sub_src = "eyepacs_s1" if "diabetic_retinopathy" in cls_folder else "odir_s1"
-                pid_raw, lat = DatasetCleaningPipeline.infer_patient_and_laterality(p.stem)
+                pid_raw, lat = infer_patient_and_laterality(p.stem)
                 stage1_items.append(
                     {
                         "member_name": info.filename,
@@ -526,7 +293,7 @@ def run_multi_zip_curation_and_preprocessing(
                     continue
                 grade_str = p.parts[0]
                 dr_grade = int(grade_str) if grade_str in {"0", "1", "2", "3", "4"} else 0
-                pid_raw, lat = DatasetCleaningPipeline.infer_patient_and_laterality(p.stem)
+                pid_raw, lat = infer_patient_and_laterality(p.stem)
                 stage2_items.append(
                     {
                         "member_name": info.filename,
@@ -624,7 +391,7 @@ def run_multi_zip_curation_and_preprocessing(
     fda_ref_imgs = []
     top_normal_rows = sorted(
         [r for r in stage2_unique if r["dr_grade"] == 0 and r["split"] == "train_val"],
-        key=lambda x: x["quality_score"],
+        key=lambda x: float(x["quality_score"] or 0),  # cached rows may have "" (score not recorded)
         reverse=True,
     )[:64]
     for r in top_normal_rows:
@@ -745,10 +512,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Clean, deduplicate, and preprocess retinal datasets for Google Colab TPU/GPU training."
     )
-    parser.add_argument("--input-dir", type=str, default="", help="Path to raw dataset folder")
     parser.add_argument("--zip-dir", type=str, default="", help="Path to folder containing dataset-*.zip archives")
     parser.add_argument("--output-dir", type=str, default="data/processed", help="Output directory")
-    parser.add_argument("--source-name", type=str, default="custom", help="Dataset source identifier")
     parser.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 1), help="Parallel CPU workers")
     args = parser.parse_args()
 
@@ -757,13 +522,8 @@ def main() -> None:
             zip_dir=args.zip_dir, output_dir=args.output_dir, workers=args.workers
         )
         print(json.dumps(report["preprocessing_statistics"], indent=2))
-    elif args.input_dir:
-        pipeline = DatasetCleaningPipeline()
-        raw_records = pipeline.discover_folder_dataset(args.input_dir, source_name=args.source_name)
-        summary, _ = pipeline.clean_and_split_records(raw_records, output_dir=args.output_dir)
-        print(f"Dataset Cleaning Complete: {summary}")
     else:
-        parser.error("Provide either --zip-dir or --input-dir")
+        parser.error("Provide --zip-dir")
 
 
 if __name__ == "__main__":

@@ -130,37 +130,13 @@ def test_bilateral_patient_worse_eye_aggregation() -> None:
     assert pairs[0].is_referable_dr is True
 
 
-def test_dataset_cleaning_pipeline_end_to_end(tmp_path) -> None:
-    import cv2
-    from src.data.dataset_cleaner_cli import DatasetCleaningPipeline
+def test_cached_iqa_score_is_numeric_so_mixed_rows_sort(tmp_path) -> None:
+    from src.data.dataset_cleaner_cli import _read_iqa_sidecar, _write_iqa_sidecar
 
-    raw_dir = tmp_path / "raw_dataset"
-    for grade in [0, 2]:
-        (raw_dir / str(grade)).mkdir(parents=True, exist_ok=True)
-        for p_idx in range(3):
-            img = generate_synthetic_fundus_image(
-                size=256, laterality="OD", num_microaneurysms=grade * 3, seed=grade * 100 + p_idx
-            )
-            bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(raw_dir / str(grade) / f"pt{grade}_{p_idx}_right.png"), bgr)
-
-    # Also write 1 blurry ungradable image and 1 exact duplicate
-    blur_img = generate_synthetic_fundus_image(size=256, simulate_severe_blur=True, seed=999)
-    cv2.imwrite(str(raw_dir / "0" / "blurry_bad_left.png"), cv2.cvtColor(blur_img, cv2.COLOR_RGB2BGR))
-
-    dup_img = generate_synthetic_fundus_image(size=256, laterality="OD", num_microaneurysms=0, seed=0)
-    cv2.imwrite(str(raw_dir / "0" / "duplicate_copy_right.png"), cv2.cvtColor(dup_img, cv2.COLOR_RGB2BGR))
-
-    cleaner = DatasetCleaningPipeline(stage1_size=128, stage2_size=128, n_splits=2)
-    discovered = cleaner.discover_folder_dataset(raw_dir, source_name="test_ds")
-    assert len(discovered) == 8
-
-    out_dir = tmp_path / "cleaned_out"
-    summary, splits = cleaner.clean_and_split_records(discovered, output_dir=out_dir)
-    assert summary.total_scanned == 8
-    assert summary.rejected_by_iqa == 1
-    assert summary.duplicates_removed == 1
-    assert summary.clean_unique_gradable == 6
-    assert len(list((out_dir / "images_512").glob("*.png"))) == 6
-    assert summary.manifest_csv_path.exists()
-
+    cached = str(tmp_path / "a.jpg")
+    _write_iqa_sidecar(cached, 0.8123456)
+    score, _ = _read_iqa_sidecar(cached)
+    assert score == 0.8123
+    missing, _ = _read_iqa_sidecar(str(tmp_path / "no_sidecar.jpg"))
+    rows = [{"quality_score": 0.9}, {"quality_score": score}, {"quality_score": missing}]  # new + cached + unknown
+    assert [r["quality_score"] for r in sorted(rows, key=lambda x: float(x["quality_score"] or 0))] == [missing, score, 0.9]
