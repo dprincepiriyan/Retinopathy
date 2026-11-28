@@ -110,35 +110,3 @@ class ResidualAttentionUNetCDAE(nn.Module):
         delta_x = self.residual_head(d1)
         x_clean = torch.clamp(x + self.residual_scale_alpha * delta_x, 0.0, 1.0)
         return x_clean, delta_x
-
-
-class CharbonnierSSIMLoss(nn.Module):
-    """Combined Charbonnier + Structural Similarity (SSIM) loss for CDAE training."""
-
-    def __init__(self, eps: float = 1e-3, ssim_weight: float = 0.4) -> None:
-        super().__init__()
-        self.eps = eps
-        self.ssim_weight = ssim_weight
-
-    @staticmethod
-    def _ssim_loss(pred: torch.Tensor, target: torch.Tensor, window_size: int = 7) -> torch.Tensor:
-        c1 = 0.01 ** 2
-        c2 = 0.03 ** 2
-        pad = window_size // 2
-        mu_x = F.avg_pool2d(pred, window_size, stride=1, padding=pad)
-        mu_y = F.avg_pool2d(target, window_size, stride=1, padding=pad)
-
-        sigma_x = F.avg_pool2d(pred * pred, window_size, stride=1, padding=pad) - mu_x * mu_x
-        sigma_y = F.avg_pool2d(target * target, window_size, stride=1, padding=pad) - mu_y * mu_y
-        sigma_xy = F.avg_pool2d(pred * target, window_size, stride=1, padding=pad) - mu_x * mu_y
-
-        num = (2.0 * mu_x * mu_y + c1) * (2.0 * sigma_xy + c2)
-        den = (mu_x * mu_x + mu_y * mu_y + c1) * (sigma_x + sigma_y + c2)
-        ssim_map = num / (den + 1e-8)
-        return torch.clamp(1.0 - ssim_map.mean(), 0.0, 2.0)
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        diff = pred - target
-        charbonnier = torch.mean(torch.sqrt(diff * diff + self.eps * self.eps))
-        ssim = self._ssim_loss(pred, target)
-        return (1.0 - self.ssim_weight) * charbonnier + self.ssim_weight * ssim

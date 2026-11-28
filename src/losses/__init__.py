@@ -3,7 +3,6 @@
 from src.losses.asymmetric_focal_loss import AsymmetricFocalLoss
 from src.losses.ordinal_focal_loss import (
     CORALOrdinalFocalLoss,
-    coral_logits_to_expected_grade,
     coral_logits_to_probs,
     encode_ordinal_targets,
 )
@@ -14,6 +13,5 @@ __all__ = [
     "CORALOrdinalFocalLoss",
     "encode_ordinal_targets",
     "coral_logits_to_probs",
-    "coral_logits_to_expected_grade",
     "SoftQWKLoss",
 ]

@@ -2,7 +2,6 @@
 
 from src.tier1_purifiers.fda import FourierDomainAdapter, fourier_domain_adaptation
 from src.tier1_purifiers.residual_cdae import (
-    CharbonnierSSIMLoss,
     ResidualAttentionUNetCDAE,
 )
 
@@ -10,5 +9,4 @@ __all__ = [
     "fourier_domain_adaptation",
     "FourierDomainAdapter",
     "ResidualAttentionUNetCDAE",
-    "CharbonnierSSIMLoss",
 ]

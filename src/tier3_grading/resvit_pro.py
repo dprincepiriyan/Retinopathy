@@ -206,7 +206,6 @@ class ResViTPro(nn.Module):
         return {
             "tri_head": tri_out,
             "feature_map": lesion_gated_s4,
-            "fpn_stride4": lesion_gated_s4,
             "lesion_maps": lesion_prob_maps,
             "cross_attention_weights": attn_weights,
             "fused_embedding": fused_embedding,

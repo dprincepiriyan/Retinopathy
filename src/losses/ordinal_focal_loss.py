@@ -38,11 +38,6 @@ def coral_logits_to_probs(ordinal_logits: torch.Tensor) -> torch.Tensor:
     return raw_probs / raw_probs.sum(dim=1, keepdim=True)
 
 
-def coral_logits_to_expected_grade(ordinal_logits: torch.Tensor) -> torch.Tensor:
-    """Compute expected continuous severity score E[y] = sum_{k=0}^{K-2} P(y > k) in [0, K-1]."""
-    return torch.sigmoid(ordinal_logits).sum(dim=1)
-
-
 class CORALOrdinalFocalLoss(nn.Module):
     """Ordinal Focal Loss over K-1 cumulative thresholds with optional threshold importance weights."""
 

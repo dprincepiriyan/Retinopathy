@@ -132,7 +132,6 @@ class MultiLabelTriageEnsemble(nn.Module):
             "logits_convnext": logits_convnext,
             "probs_strong": probs_strong,
             "probs_convnext": probs_convnext,
-            "probs_ensemble": probs_ens,
             # Uniform Stage-1 contract shared with PretrainedTriageNet
             "logits": torch.logit(probs_ens.clamp(1e-6, 1 - 1e-6)),
             "member_logits": [logits_strong, logits_convnext],

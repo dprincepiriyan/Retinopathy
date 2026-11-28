@@ -13,9 +13,6 @@ import torch
 import torch.nn as nn
 
 
-LESION_CHANNEL_NAMES = ("Microaneurysms (MA)", "Hemorrhages (HE)", "Hard Exudates (EX)", "Cotton Wool Spots (CWS)")
-
-
 class LesionGuidedAttentionBranch(nn.Module):
     """Predicts 4-channel lesion probability maps and re-weights spatial feature maps."""
 
