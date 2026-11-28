@@ -314,7 +314,7 @@ d:/Retinopathy/
 │   ├── data/
 │   │   ├── datasets.py                 # Multi-dataset loader & bilateral patient pair builder
 │   │   ├── preprocessing.py            # Circular Hough FOV crop, Green-CLAHE
-│   │   ├── augmentations.py            # Retinal-safe MixUp, IDRiD lesion copy-paste synthesis
+│   │   ├── augmentations.py            # Retinal-safe training augmentations (RetinalTrainAugment)
 │   │   └── samplers.py                 # Effective-number class-balanced & curriculum samplers
 │   ├── tier1_purifiers/
 │   │   ├── fda.py                      # Fast Fourier Domain Adaptation (generator-free)
