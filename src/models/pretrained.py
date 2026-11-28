@@ -138,7 +138,6 @@ class PretrainedOrdinalGrader(nn.Module):
         return {
             "tri_head": tri_out,
             "feature_map": fmap,
-            "fpn_stride4": fmap,  # backward-compatible alias used by older callers
             "lesion_maps": None,
             "cross_attention_weights": None,
             "fused_embedding": emb,

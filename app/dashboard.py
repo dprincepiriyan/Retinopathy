@@ -33,6 +33,13 @@ def get_pipeline() -> RetinaNetProPipeline:
     return RetinaNetProPipeline()
 
 
+# Streamlit reruns the whole script on every widget change; cache the expensive per-eye AI
+# (fold ensemble + Grad-CAM++) on the image so editing notes/signature stays instant.
+@st.cache_data(show_spinner="Running the AI models on this eye...", max_entries=32)
+def evaluate_eye_cached(image_rgb: np.ndarray, laterality: str):
+    return get_pipeline().evaluate_eye(image_rgb, laterality=laterality)
+
+
 def main() -> None:
     st.title("👁️ RetinaNet-Pro: Automated Retinal Screening & DR Severity Dashboard")
     st.caption(
@@ -130,10 +137,13 @@ def main() -> None:
         st.info("Please upload at least one fundus photograph (OD or OS) to run screening.")
         return
 
-    report, visuals = pipeline.evaluate_bilateral_patient(
+    od_findings, od_vis = evaluate_eye_cached(od_img, "OD") if od_img is not None else (None, None)
+    os_findings, os_vis = evaluate_eye_cached(os_img, "OS") if os_img is not None else (None, None)
+    visuals = {lat: vis for lat, vis in (("OD", od_vis), ("OS", os_vis)) if vis is not None}
+    report = pipeline.aggregator.aggregate(
         patient_id=patient_id,
-        od_image_rgb=od_img,
-        os_image_rgb=os_img,
+        od_findings=od_findings,
+        os_findings=os_findings,
         patient_name=patient_name,
         patient_age=int(patient_age),
         doctor_verification_notes=doctor_notes,
@@ -205,12 +215,13 @@ def main() -> None:
     st.divider()
     st.subheader("📄 Printable Hospital Report Card & 1-Click PDF Export")
     if pipeline.stage1_trained and pipeline.stage2_trained:
-        st.download_button(
-            label="⬇️ Download Clinical PDF Report (WeasyPrint / PDF-1.4)",
-            data=pdf_generator.generate_pdf_bytes(report),
-            file_name=f"RetinaNetPro_Report_{report.patient_id}.pdf",
-            mime="application/pdf",
-        )
+        if st.button("📄 Prepare PDF report (uses the notes and signature above)"):
+            st.download_button(
+                label="⬇️ Download Clinical PDF Report (WeasyPrint / PDF-1.4)",
+                data=pdf_generator.generate_pdf_bytes(report),
+                file_name=f"RetinaNetPro_Report_{report.patient_id}.pdf",
+                mime="application/pdf",
+            )
     else:
         st.info("PDF export is disabled in demo mode (untrained networks).")
 

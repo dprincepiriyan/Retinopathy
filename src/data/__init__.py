@@ -15,7 +15,6 @@ from src.data.datasets import (
 )
 from src.data.preprocessing import (
     Tier0Preprocessor,
-    ben_graham_normalization,
     detect_and_crop_circular_fov,
     green_lab_clahe,
 )
@@ -23,7 +22,6 @@ from src.data.samplers import CurriculumResolutionScheduler, EffectiveNumberSamp
 
 __all__ = [
     "detect_and_crop_circular_fov",
-    "ben_graham_normalization",
     "green_lab_clahe",
     "Tier0Preprocessor",
     "RetinalDatasetRecord",

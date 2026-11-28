@@ -2,7 +2,7 @@
 
 **Last Updated:** November 21, 2026  
 **Repository:** `Retinopathy` (`RetinaNet-Pro`)  
-**Execution Paradigm:** Hybrid Cloud-Train (Google Colab GPU/TPU) & Offline Local Inference (<500ms on Laptop GPU)
+**Execution Paradigm:** Hybrid Cloud-Train (Google Colab GPU) & Offline Local Inference (<500ms on Laptop GPU)
 
 ---
 

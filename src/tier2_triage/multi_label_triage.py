@@ -18,7 +18,6 @@ from src.tier2_triage.convnext_triage import ConvNeXtV2CoordinateTriage
 from src.tier2_triage.glaucoma_onh_branch import (
     ONHBiomarkers,
     OpticNerveHeadUNet,
-    compute_vcdr_and_isnt_metrics,
 )
 from src.tier2_triage.strong_cnn import StrongCNN
 
@@ -142,31 +141,3 @@ class MultiLabelTriageEnsemble(nn.Module):
             "probs": probs_ens,
         }
 
-    @torch.no_grad()
-    def predict_eye(
-        self,
-        tensor_512: torch.Tensor,
-        onh_roi_tensor: torch.Tensor | None = None,
-        laterality: str = "OD",
-        biomarkers_override: ONHBiomarkers | None = None,
-        use_embedded_onh_unet: bool = False,
-    ) -> Stage1TriageOutput:
-        """Run Stage-1 inference for a single eye scan.
-
-        The embedded ONH U-Net is only used when `use_embedded_onh_unet=True`
-        (i.e. it has actually been trained); otherwise biomarkers are omitted.
-        """
-        self.eval()
-        if tensor_512.ndim == 3:
-            tensor_512 = tensor_512.unsqueeze(0)
-        out = self.forward(tensor_512)
-
-        onh_bio = biomarkers_override
-        if onh_bio is None and use_embedded_onh_unet and onh_roi_tensor is not None:
-            if onh_roi_tensor.ndim == 3:
-                onh_roi_tensor = onh_roi_tensor.unsqueeze(0)
-            seg_masks = self.onh_unet(onh_roi_tensor)[0].cpu().numpy()
-            onh_bio = compute_vcdr_and_isnt_metrics(
-                disc_mask=seg_masks[0], cup_mask=seg_masks[1], laterality=laterality
-            )
-        return fuse_stage1_outputs(out, onh_bio)

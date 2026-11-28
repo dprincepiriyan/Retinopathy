@@ -130,11 +130,8 @@ class RetinaNetProPipeline:
         self.stage2_trained = bool(self.stage2_members)
         if not self.stage2_trained:
             self.stage2_members.append((ResViTPro(fpn_dim=32, num_classes=5, num_heads=4).to(self.device).eval(), 256))
-        # Backward-compatible attribute names
-        self.stage1_ensemble = self.stage1_model
-        self.stage2_resvit = self.stage2_members[0][0]
 
-        self.preprocessor = Tier0Preprocessor(stage1_size=self.stage1_size, stage2_size=self.stage2_members[0][1])
+        self.preprocessor = Tier0Preprocessor()
 
         # Calibration (thresholds, temperature, conformal q_hat) from notebook 03 / calibration CLI
         self.qwk_optimizer = NelderMeadQWKOptimizer()

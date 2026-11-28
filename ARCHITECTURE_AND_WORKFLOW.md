@@ -313,7 +313,7 @@ d:/Retinopathy/
 ├── src/
 │   ├── data/
 │   │   ├── datasets.py                 # Multi-dataset loader & bilateral patient pair builder
-│   │   ├── preprocessing.py            # Circular Hough FOV crop, Ben Graham, Green-CLAHE
+│   │   ├── preprocessing.py            # Circular Hough FOV crop, Green-CLAHE
 │   │   ├── augmentations.py            # Retinal-safe MixUp, IDRiD lesion copy-paste synthesis
 │   │   └── samplers.py                 # Effective-number class-balanced & curriculum samplers
 │   ├── tier1_purifiers/

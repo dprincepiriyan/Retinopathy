@@ -13,7 +13,7 @@ The system operates across a **6-Tier Modular Pipeline (Tiers 0–5)**:
 1. **Tier 0: Deterministic Clinical Preprocessing & Quality Gate**
    - Automated circular Field-of-View (FOV) detection & aspect-preserving square padding.
    - Local image quality assessment (IQA) gatekeeper (rejection/recapture flag for ungradable scans).
-   - Ben Graham local illumination subtraction + Green-channel & LAB CLAHE contrast normalization.
+   - Green-channel & LAB CLAHE contrast normalization.
 
 2. **Tier 1: Domain Harmonization & Micro-Lesion Preservation**
    - **Fourier Domain Adaptation (FDA):** Generator-free, low-frequency amplitude style alignment (<5ms latency, zero lesion hallucination risk).

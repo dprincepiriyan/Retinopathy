@@ -5,7 +5,6 @@ with 1 click. Uses WeasyPrint when system Cairo/Pango libraries are available,
 and falls back to a clean self-contained PDF 1.4 writer when running in minimal environments.
 """
 
-from pathlib import Path
 import textwrap
 from typing import Optional
 
@@ -131,11 +130,3 @@ class ClinicalPDFGenerator:
             if report.doctor_signature:
                 lines.append(f"Signed By   : {report.doctor_signature}")
             return self._build_minimal_pdf_bytes(lines)
-
-    def save_pdf(self, report: BilateralPatientReport, output_path: str | Path) -> Path:
-        """Render and save the printable clinical PDF to `output_path`."""
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pdf_bytes = self.generate_pdf_bytes(report)
-        path.write_bytes(pdf_bytes)
-        return path

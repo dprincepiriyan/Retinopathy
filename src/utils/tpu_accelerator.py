@@ -1,35 +1,26 @@
-"""Google Colab TPU (`torch_xla`) & Local GPU/CPU Hardware Accelerator Abstraction.
+"""CUDA / CPU accelerator abstraction for training and evaluation.
 
-IMPORTANT: Colab T4 GPUs have no bfloat16 support, so CUDA autocast falls back to
-float16. float16 training REQUIRES loss scaling, otherwise small gradients underflow
-to zero. `backward()` / `clip_and_step()` below apply a `torch.amp.GradScaler`
-automatically whenever float16 autocast is active. GPU runtimes (T4/L4/A100) are
-recommended over TPU for this project (dynamic resolutions + small batches).
+IMPORTANT: Colab T4 GPUs have no native bfloat16, so CUDA autocast uses float16 there.
+float16 training REQUIRES loss scaling, otherwise small gradients underflow to zero.
+`backward()` / `clip_and_step()` below apply a `torch.amp.GradScaler` automatically
+whenever float16 autocast is active.
 
-Optimizes RetinaNet-Pro training specifically for Google Colab TPUs (v2-8 / v5e-1):
-1. Native `bfloat16` mixed precision on TPU (avoids FP16 GradScaler XLA graph breaks).
-2. Enforces static batch/spatial dimensions (`drop_last=True`) to prevent expensive
-   XLA dynamic-shape recompilations.
-3. Wraps `xm.optimizer_step(optimizer)` and `xm.mark_step()` transparently while
-   remaining 100% compatible with local CUDA GPUs (RTX 3050) and CPUs.
+(The module/class names keep "TPU" only so existing notebooks keep importing them;
+TPU support was removed because every caller uses a GPU runtime.)
 """
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 import torch
-import torch.nn as nn
 
 
 @dataclass
 class AcceleratorInfo:
     """Runtime accelerator metadata."""
 
-    backend: str          # "tpu", "cuda", or "cpu"
+    backend: str          # "cuda" or "cpu"
     device: torch.device
     amp_dtype: torch.dtype
-    is_tpu: bool
     device_name: str
 
 
@@ -46,11 +37,11 @@ def cuda_has_native_bf16() -> bool:
 
 
 class ColabTPUAccelerator:
-    """Unified hardware accelerator supporting Google Colab TPU (`torch_xla`), CUDA, and CPU."""
+    """Picks CUDA when available (else CPU) and handles mixed precision + loss scaling."""
 
     def __init__(self, prefer_tpu: bool = False) -> None:
-        self._xm: Any = None
-        self.info = self._detect_hardware(prefer_tpu=prefer_tpu)
+        # `prefer_tpu` is ignored; kept so notebooks calling ColabTPUAccelerator(prefer_tpu=False) still work.
+        self.info = self._detect_hardware()
         self.amp_enabled = True
         self.grad_scaler = None
         if self.uses_grad_scaler:
@@ -73,55 +64,26 @@ class ColabTPUAccelerator:
             and getattr(self, "amp_enabled", True)
         )
 
-    def _detect_hardware(self, prefer_tpu: bool = True) -> AcceleratorInfo:
-        if prefer_tpu:
-            try:
-                import torch_xla.core.xla_model as xm  # type: ignore
-
-                self._xm = xm
-                dev = xm.xla_device()
-                return AcceleratorInfo(
-                    backend="tpu",
-                    device=dev,
-                    amp_dtype=torch.bfloat16,
-                    is_tpu=True,
-                    device_name=f"Google Colab TPU ({dev})",
-                )
-            except ImportError:
-                pass
-
+    @staticmethod
+    def _detect_hardware() -> AcceleratorInfo:
         if torch.cuda.is_available():
-            dev = torch.device("cuda")
-            amp_dtype = torch.bfloat16 if cuda_has_native_bf16() else torch.float16
             return AcceleratorInfo(
                 backend="cuda",
-                device=dev,
-                amp_dtype=amp_dtype,
-                is_tpu=False,
+                device=torch.device("cuda"),
+                amp_dtype=torch.bfloat16 if cuda_has_native_bf16() else torch.float16,
                 device_name=torch.cuda.get_device_name(0),
             )
-
-        return AcceleratorInfo(
-            backend="cpu",
-            device=torch.device("cpu"),
-            amp_dtype=torch.bfloat16,
-            is_tpu=False,
-            device_name="CPU",
-        )
+        return AcceleratorInfo(backend="cpu", device=torch.device("cpu"), amp_dtype=torch.bfloat16, device_name="CPU")
 
     @property
     def device(self) -> torch.device:
         return self.info.device
 
     def autocast_context(self, enabled: bool = True):
-        """Return the appropriate mixed-precision autocast context manager (`bfloat16` on TPU)."""
-        if not enabled or not getattr(self, "amp_enabled", True):
+        """Return the mixed-precision autocast context (no-op on CPU or when AMP is off)."""
+        if not enabled or not getattr(self, "amp_enabled", True) or self.info.backend != "cuda":
             return nullcontext()
-        if self.info.is_tpu:
-            return torch.autocast("xla", dtype=torch.bfloat16)
-        if self.info.backend == "cuda":
-            return torch.autocast("cuda", dtype=self.info.amp_dtype)
-        return nullcontext()
+        return torch.autocast("cuda", dtype=self.info.amp_dtype)
 
     def backward(self, loss: torch.Tensor) -> None:
         """Backward pass with loss scaling when float16 autocast is active."""
@@ -150,24 +112,5 @@ class ColabTPUAccelerator:
             return self.grad_scaler.get_scale() >= scale_before
         if max_norm is not None:
             torch.nn.utils.clip_grad_norm_(parameters, max_norm=max_norm)
-        self.optimizer_step(optimizer)
+        optimizer.step()
         return True
-
-    def optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        """Execute optimizer step and synchronize XLA graph on TPU."""
-        if self.info.is_tpu and self._xm is not None:
-            self._xm.optimizer_step(optimizer, barrier=True)
-            self._xm.mark_step()
-        else:
-            optimizer.step()
-
-    def save_checkpoint(self, model: nn.Module, path: str | Path) -> Path:
-        """Save model state_dict moved safely to CPU so checkpoints load on any laptop GPU/CPU."""
-        out_path = Path(path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        cpu_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-        if self.info.is_tpu and self._xm is not None:
-            self._xm.save(cpu_state, str(out_path))
-        else:
-            torch.save(cpu_state, str(out_path))
-        return out_path

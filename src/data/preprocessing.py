@@ -21,9 +21,6 @@ class PreprocessedFundus:
     cropped_rgb: np.ndarray
     fov_mask: np.ndarray
     enhanced_rgb: np.ndarray
-    ben_graham_rgb: np.ndarray
-    tensor_512: np.ndarray
-    tensor_768: np.ndarray
     estimated_radius: float
 
 
@@ -100,32 +97,6 @@ def detect_and_crop_circular_fov(
     return cropped_img, cropped_mask, max(radius, 16.0)
 
 
-def ben_graham_normalization(
-    image_rgb: np.ndarray,
-    fov_mask: np.ndarray,
-    radius: float,
-    sigma_divisor: float = 30.0,
-) -> np.ndarray:
-    """Apply Ben Graham local illumination subtraction:
-    I_BG(x, y) = 4 * I(x, y) - 4 * (G_sigma * I)(x, y) + 128
-
-    Erodes FOV mask slightly at the perimeter to prevent bright border ringing artifacts.
-    """
-    sigma = max(radius / sigma_divisor, 1.5)
-    local_avg = cv2.GaussianBlur(image_rgb, (0, 0), sigmaX=sigma, sigmaY=sigma)
-    bg = cv2.addWeighted(image_rgb, 4.0, local_avg, -4.0, 128.0)
-
-    # Erode mask by ~2% of radius to suppress high-contrast edge halo
-    erode_px = max(3, int(radius * 0.02))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_px, erode_px))
-    eroded_mask = cv2.erode(fov_mask, kernel, iterations=1)
-
-    result = np.full_like(bg, 128, dtype=np.uint8)
-    mask_3c = eroded_mask[:, :, None] > 0
-    result = np.where(mask_3c, bg, 0).astype(np.uint8)
-    return result
-
-
 def green_lab_clahe(
     image_rgb: np.ndarray,
     fov_mask: np.ndarray,
@@ -164,17 +135,13 @@ def green_lab_clahe(
 
 
 class Tier0Preprocessor:
-    """End-to-end deterministic Tier 0 preprocessor producing 512x512 and 768x768 tensors."""
+    """Deterministic Tier 0 preprocessor: circular FOV crop + Green/LAB CLAHE enhancement."""
 
     def __init__(
         self,
-        stage1_size: int = 512,
-        stage2_size: int = 768,
         clahe_clip_limit: float = 2.0,
         clahe_grid_size: Tuple[int, int] = (8, 8),
     ) -> None:
-        self.stage1_size = stage1_size
-        self.stage2_size = stage2_size
         self.clahe_clip_limit = clahe_clip_limit
         self.clahe_grid_size = clahe_grid_size
 
@@ -188,22 +155,10 @@ class Tier0Preprocessor:
             clip_limit=self.clahe_clip_limit,
             tile_grid_size=self.clahe_grid_size,
         )
-        bg_rgb = ben_graham_normalization(enhanced_rgb, fov_mask, radius)
-
-        # INTER_AREA matches the training-data writer (dataset_cleaner_cli) exactly
-        img_512 = cv2.resize(enhanced_rgb, (self.stage1_size, self.stage1_size), interpolation=cv2.INTER_AREA)
-        img_768 = cv2.resize(enhanced_rgb, (self.stage2_size, self.stage2_size), interpolation=cv2.INTER_AREA)
-
-        # Normalize to [0, 1] CHW float32 tensors
-        tensor_512 = np.transpose(img_512.astype(np.float32) / 255.0, (2, 0, 1))
-        tensor_768 = np.transpose(img_768.astype(np.float32) / 255.0, (2, 0, 1))
 
         return PreprocessedFundus(
             cropped_rgb=cropped_rgb,
             fov_mask=fov_mask,
             enhanced_rgb=enhanced_rgb,
-            ben_graham_rgb=bg_rgb,
-            tensor_512=tensor_512,
-            tensor_768=tensor_768,
             estimated_radius=radius,
         )

@@ -6,7 +6,7 @@ calibration split so predicted probabilities reflect true empirical accuracy.
 
 import numpy as np
 from scipy.optimize import minimize_scalar
-from scipy.special import expit, softmax
+from scipy.special import softmax
 
 
 class TemperatureScaler:
@@ -29,13 +29,3 @@ class TemperatureScaler:
         res = minimize_scalar(nll, bounds=(0.1, 10.0), method="bounded")
         self.temperature = float(res.x)
         return self
-
-    def transform_multiclass(self, logits: np.ndarray) -> np.ndarray:
-        """Return temperature-calibrated class probabilities of shape (N, K)."""
-        logits_arr = np.asarray(logits, dtype=np.float64)
-        return softmax(logits_arr / max(self.temperature, 1e-3), axis=-1)
-
-    def transform_binary(self, logits: np.ndarray) -> np.ndarray:
-        """Return temperature-calibrated binary/multi-label Sigmoid probabilities."""
-        logits_arr = np.asarray(logits, dtype=np.float64)
-        return expit(logits_arr / max(self.temperature, 1e-3))
