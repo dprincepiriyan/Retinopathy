@@ -180,8 +180,11 @@ class RetinaNetProPipeline:
         """Fold-ensemble x TTA Stage-2 prediction for one eye."""
         class_probs, ref_probs, cont_scores = [], [], []
         first_out = None
+        inputs: Dict[int, torch.Tensor] = {}  # fold models share a size: resize + JPEG round-trip once per size
         for model, size in self.stage2_members:
-            x = self._to_tensor(enhanced_rgb, size)
+            if size not in inputs:
+                inputs[size] = self._to_tensor(enhanced_rgb, size)
+            x = inputs[size]
             for v in range(self.tta_views):
                 out = model(self._tta(x, v))
                 tri = out["tri_head"]
@@ -198,12 +201,13 @@ class RetinaNetProPipeline:
             "continuous_score": float(np.clip(np.mean(cont_scores), 0.0, 4.5)),
             "ensemble_std": float(np.std(ref_probs)) if len(ref_probs) > 1 else 0.0,
             "first_out": first_out,
+            "first_input": inputs[self.stage2_members[0][1]],
         }
 
-    def _gradcam_map(self, enhanced_rgb: np.ndarray, output_size: Tuple[int, int]) -> np.ndarray:
+    def _gradcam_map(self, x: torch.Tensor, output_size: Tuple[int, int]) -> np.ndarray:
         """Real Grad-CAM++ w.r.t. the predicted continuous severity of the first ensemble member."""
-        model, size = self.stage2_members[0]
-        x = self._to_tensor(enhanced_rgb, size).detach()
+        model = self.stage2_members[0][0]
+        x = x.detach()
         with torch.enable_grad():
             model.zero_grad(set_to_none=True)
             out = model(x)
@@ -290,7 +294,7 @@ class RetinaNetProPipeline:
 
         # Explainability: real Grad-CAM++ (gradients of the continuous severity score)
         h_orig, w_orig = prep.cropped_rgb.shape[:2]
-        gradcam_map = self._gradcam_map(prep.enhanced_rgb, (h_orig, w_orig))
+        gradcam_map = self._gradcam_map(s2["first_input"], (h_orig, w_orig))
         gradcam_overlay = self.gradcam.overlay_heatmap_on_rgb(prep.cropped_rgb, gradcam_map, fov_mask=prep.fov_mask)
         first_out = s2["first_out"]
         stage2_model = self.stage2_members[0][0]

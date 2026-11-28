@@ -194,7 +194,10 @@ def test_pipeline_uses_trained_checkpoints_and_calibration(tmp_path) -> None:
     assert not hasattr(pipe, "_apply_temperature")  # uses shared apply_temperature from calibration.py
 
     img = generate_synthetic_fundus_image(size=256, laterality="OD", num_microaneurysms=6, seed=7)
+    sizes, to_tensor = [], pipe._to_tensor
+    pipe._to_tensor = lambda rgb, size: sizes.append(size) or to_tensor(rgb, size)
     findings, vis = pipe.evaluate_eye(img, "OD")
+    assert len(sizes) == 2  # Stage-1 once + Stage-2 once, shared by both folds and Grad-CAM++
     assert findings.is_gradable and findings.onh_biomarkers is None
     assert abs(sum(findings.class_probabilities) - 1.0) < 1e-3
     assert all("Microaneurysm" not in c.lesion_type for c in findings.lesion_candidates)
