@@ -34,17 +34,12 @@ class Stage1TriageOutput:
     prob_glaucoma: float
     prob_cataract: float
     onh_biomarkers: Optional[ONHBiomarkers]
-    coexisting_conditions: list[str]
     model_probabilities: Dict[str, Dict[str, float]]
-
-
-DEFAULT_STAGE1_DECISION_THRESHOLDS = {"dr": 0.40, "glaucoma": 0.45, "cataract": 0.50}
 
 
 def fuse_stage1_outputs(
     model_out: Dict[str, object],
     onh_biomarkers: Optional[ONHBiomarkers] = None,
-    decision_thresholds: Optional[Dict[str, float]] = None,
     onh_fusion_weight: float = 0.45,
 ) -> Stage1TriageOutput:
     """Turn a Stage-1 model output dict (batch of 1) into clinical triage probabilities.
@@ -52,10 +47,6 @@ def fuse_stage1_outputs(
     Works with any Stage-1 model that returns `probs` and `member_logits`.
     The ONH biometric risk is fused into P(glaucoma) only when real biomarkers exist.
     """
-    thr = dict(DEFAULT_STAGE1_DECISION_THRESHOLDS)
-    if decision_thresholds:
-        thr.update(decision_thresholds)
-
     p_ens = model_out["probs"][0].detach().float().cpu().numpy()  # type: ignore[index]
     member_logits = model_out.get("member_logits", [])  # type: ignore[union-attr]
     member_names = model_out.get("member_names") or [f"member_{i}" for i in range(len(member_logits))]  # type: ignore[union-attr]
@@ -73,14 +64,6 @@ def fuse_stage1_outputs(
         )
     prob_cataract = float(np.clip(p_ens[2], 0.0, 1.0))
 
-    detected: list[str] = []
-    if prob_dr >= thr["dr"]:
-        detected.append("Diabetic Retinopathy")
-    if prob_glaucoma >= thr["glaucoma"]:
-        detected.append("Glaucoma Suspect")
-    if prob_cataract >= thr["cataract"]:
-        detected.append("Cataract / Media Opacity")
-
     model_probs: Dict[str, Dict[str, float]] = {}
     for name, logits in zip(member_names, member_logits):
         p = torch.sigmoid(logits[0].detach().float()).cpu().numpy()
@@ -95,7 +78,6 @@ def fuse_stage1_outputs(
         prob_glaucoma=round(prob_glaucoma, 4),
         prob_cataract=round(prob_cataract, 4),
         onh_biomarkers=onh_biomarkers,
-        coexisting_conditions=detected,
         model_probabilities=model_probs,
     )
 
