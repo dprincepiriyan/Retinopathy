@@ -52,15 +52,6 @@ def _stratified_halves(y: np.ndarray, seed: int) -> tuple[np.ndarray, np.ndarray
     return np.sort(np.array(a_idx, dtype=np.int64)), np.sort(np.array(b_idx, dtype=np.int64))
 
 
-def conformal_sets(probs: np.ndarray, q_hat: float) -> list[list[int]]:
-    """Pure split-conformal (LAC) sets: {k : 1 - p_k <= q_hat}, never empty."""
-    sets = []
-    for row in probs:
-        s = [int(k) for k in np.where(row >= 1.0 - q_hat)[0]]
-        sets.append(s or [int(np.argmax(row))])
-    return sets
-
-
 def evaluate_calibrated(
     pred: Dict[str, np.ndarray],
     thresholds: np.ndarray,
@@ -73,16 +64,14 @@ def evaluate_calibrated(
     raw = pred["probs"]
     cal = apply_temperature(raw, temperature)
     grade_thr = NelderMeadQWKOptimizer.discretize(pred["continuous_scores"], thresholds)
-    sets = conformal_sets(cal, q_hat)
-    covered = np.array([yt in s for yt, s in zip(y, sets)])
-
     cp = SplitConformalPredictor(alpha=alpha)
     cp.q_hat_ = q_hat
     std = pred.get("member_referable_std", np.zeros(len(y)))
-    abstain = np.array(
-        [cp.predict_single(p, ensemble_std=float(sd), primary_grade=int(g)).abstain_flag
-         for p, sd, g in zip(cal, std, grade_thr)]
-    )
+    # Same call as the deployed pipeline, so coverage / set size describe the sets clinicians see.
+    results = [cp.predict_single(p, ensemble_std=float(sd), primary_grade=int(g)) for p, sd, g in zip(cal, std, grade_thr)]
+    sets = [r.prediction_set for r in results]
+    covered = np.array([yt in s for yt, s in zip(y, sets)])
+    abstain = np.array([r.abstain_flag for r in results])
     qwk_thr, lo, hi = bootstrap_ci(lambda a, b: quadratic_weighted_kappa(a, b), y, grade_thr, n_boot=n_boot)
     ref_true = (y >= 2).astype(int)
     ref_pred = (grade_thr >= 2).astype(int)

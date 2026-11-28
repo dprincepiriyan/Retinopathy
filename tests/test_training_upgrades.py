@@ -452,3 +452,13 @@ def test_stage1_combined_manifest_is_rebuilt_not_reused(tmp_path) -> None:
 
     assert n_rows(ensure_stage1_combined_manifest(tmp_path, include_aptos=True)) == 2
     assert n_rows(ensure_stage1_combined_manifest(tmp_path, include_aptos=False)) == 1  # setting change is honoured
+
+
+def test_calibration_report_measures_the_sets_clinicians_see() -> None:
+    from src.training.calibration import evaluate_calibrated
+
+    probs = np.tile([0.6, 0.3, 0.05, 0.03, 0.02], (4, 1))  # borderline: runner-up joins the displayed set
+    pred = {"probs": probs, "targets": np.array([1, 0, 1, 0]), "continuous_scores": np.full(4, 0.2)}
+    rep = evaluate_calibrated(pred, np.array([0.5, 1.5, 2.5, 3.5]), temperature=1.0, q_hat=0.4, alpha=0.05, n_boot=10)
+    assert rep["conformal_mean_set_size"] == 2.0  # {0, 1}, not the bare LAC set {0}
+    assert rep["conformal_coverage"] == 1.0
