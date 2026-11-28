@@ -61,9 +61,9 @@ def main() -> None:
 
     with st.sidebar:
         st.header("📋 Patient & Exam Metadata")
-        patient_id = st.text_input("Patient ID", value="PT-2026-0842")
+        patient_id = st.text_input("Patient ID", value="")
         patient_name = st.text_input("Patient Name", value="")
-        patient_age = st.number_input("Patient Age", min_value=1, max_value=120, value=58)
+        patient_age = st.number_input("Patient Age (0 = not recorded)", min_value=0, max_value=120, value=0)
 
         st.divider()
         st.header("🖼️ Input Mode")
@@ -145,7 +145,7 @@ def main() -> None:
         od_findings=od_findings,
         os_findings=os_findings,
         patient_name=patient_name,
-        patient_age=int(patient_age),
+        patient_age=int(patient_age) or None,
         doctor_verification_notes=doctor_notes,
         doctor_signature=doctor_signature,
     )
