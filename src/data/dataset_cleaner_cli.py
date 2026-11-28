@@ -237,12 +237,15 @@ def run_multi_zip_curation_and_preprocessing(
     # 1. Forensic archive-level SHA256 & stem overlap audit across dataset-1..5.zip
     zips = sorted(zdir.glob("*.zip"))
     sha_map: Dict[str, str] = {}
+    file_counts: Dict[str, int] = {}
     for zp in zips:
         h = hashlib.sha256()
         with open(zp, "rb") as f:
             while chunk := f.read(1024 * 1024 * 8):
                 h.update(chunk)
         sha_map[zp.name] = h.hexdigest()
+        with zipfile.ZipFile(zp, "r") as zf:
+            file_counts[zp.name] = sum(1 for info in zf.infolist() if not info.is_dir())
 
     # Discover Stage-1 records from dataset-1.zip (`seg_dataset/{cataract,glaucoma,diabetic_retinopathy,normal}`)
     stage1_items: List[Dict[str, Any]] = []
@@ -448,40 +451,43 @@ def run_multi_zip_curation_and_preprocessing(
         "zip_archives_inspected": {
             "dataset-1.zip": {
                 "sha256": sha_map.get("dataset-1.zip", ""),
-                "total_files": 4217,
+                "total_files": file_counts.get("dataset-1.zip", 0),
                 "role": "Stage-1 Multi-Label Pathology Triage (ODIR-5K + EyePACS: Cataract, Glaucoma, DR, Normal)",
                 "action": "KEPT & PREPROCESSED (512x512)",
             },
             "dataset-2.zip": {
                 "sha256": sha_map.get("dataset-2.zip", ""),
-                "total_files": 3554,
+                "total_files": file_counts.get("dataset-2.zip", 0),
                 "role": "224x224 downscaled APTOS/EyePACS subset with 2,007 scrambled/corrupted class labels",
                 "action": "EXCLUDED (88.5% duplicate of dataset-3.zip + 63.8% corrupted APTOS ground-truth labels)",
             },
             "dataset-3.zip": {
                 "sha256": sha_map.get("dataset-3.zip", ""),
-                "total_files": 10000,
+                "total_files": file_counts.get("dataset-3.zip", 0),
                 "unaugmented_highres_png": len(stage2_items),
                 "pre_augmented_jpg_discarded": skipped_pre_augmented_in_z3,
                 "role": "Stage-2 DR Severity Grading (Official High-Res APTOS 2019 Grades 0-4)",
-                "action": "KEPT 3,662 HIGH-RES ORIGINALS & PREPROCESSED (512x512 & 768x768); DISCARDED 6,338 pre-augmented copies to prevent train/test leakage",
+                "action": (
+                    f"KEPT {len(stage2_items):,} HIGH-RES ORIGINALS & PREPROCESSED (512x512 & 768x768); "
+                    f"DISCARDED {skipped_pre_augmented_in_z3:,} pre-augmented copies to prevent train/test leakage"
+                ),
             },
             "dataset-4.zip": {
                 "sha256": sha_map.get("dataset-4.zip", ""),
-                "total_files": 3554,
+                "total_files": file_counts.get("dataset-4.zip", 0),
                 "role": "100% byte-for-byte duplicate of dataset-2.zip",
                 "action": "EXCLUDED (Exact SHA-256 duplicate of dataset-2.zip)",
             },
             "dataset-5.zip": {
                 "sha256": sha_map.get("dataset-5.zip", ""),
-                "total_files": 3590,
+                "total_files": file_counts.get("dataset-5.zip", 0),
                 "role": "224x224 downscaled duplicate of APTOS 2019 (3,590/3,590 stems already in dataset-3.zip at full resolution)",
                 "action": "EXCLUDED (100% redundant low-res subset of dataset-3.zip)",
             },
         },
         "preprocessing_statistics": {
-            "total_raw_files_across_5_zips": 24915,
-            "redundant_or_corrupted_zip_files_filtered": 24915 - (len(stage1_items) + len(stage2_items)),
+            "total_raw_files_across_zips": sum(file_counts.values()),
+            "redundant_or_corrupted_zip_files_filtered": sum(file_counts.values()) - (len(stage1_items) + len(stage2_items)),
             "authoritative_scans_processed": len(all_results),
             "corrupt_or_unreadable": len(corrupt_rows),
             "rejected_by_tier0_iqa": len(rejected_rows),
