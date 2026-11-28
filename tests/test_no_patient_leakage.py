@@ -1,7 +1,6 @@
 """Tests for Phase 1 Data Curation, Perceptual Hash Deduplication & Zero Patient Leakage."""
 
 import numpy as np
-import pytest
 
 from app.assets.synthetic_fundus import generate_synthetic_fundus_image
 from src.data.datasets import (
@@ -9,7 +8,6 @@ from src.data.datasets import (
     compute_perceptual_hash,
     create_patient_stratified_splits,
     deduplicate_records_by_phash,
-    group_bilateral_pairs,
     hamming_distance_64bit,
 )
 
@@ -117,17 +115,6 @@ def test_zero_patient_overlap_and_no_augmented_test_leakage() -> None:
     # 3. No augmented sample ever enters test split or shares a patient_id with test split
     assert all(not r.is_augmented for r in test)
     assert aug_pids.isdisjoint(test_pids)
-
-
-def test_bilateral_patient_worse_eye_aggregation() -> None:
-    records = [
-        RetinalDatasetRecord(image_id="P10_OD", patient_id="P10", laterality="OD", dr_grade=1),
-        RetinalDatasetRecord(image_id="P10_OS", patient_id="P10", laterality="OS", dr_grade=3),
-    ]
-    pairs = group_bilateral_pairs(records)
-    assert len(pairs) == 1
-    assert pairs[0].patient_worse_dr_grade == 3
-    assert pairs[0].is_referable_dr is True
 
 
 def test_cached_iqa_score_is_numeric_so_mixed_rows_sort(tmp_path) -> None:

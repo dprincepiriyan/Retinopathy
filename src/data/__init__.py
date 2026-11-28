@@ -1,7 +1,6 @@
 """Data loading, deterministic clinical preprocessing, deduplication, and samplers."""
 
 from src.data.datasets import (
-    BilateralPatientPair,
     PreprocessedManifestDataset,
     RetinalDatasetRecord,
     compute_perceptual_hash,
@@ -20,7 +19,6 @@ __all__ = [
     "green_lab_clahe",
     "Tier0Preprocessor",
     "RetinalDatasetRecord",
-    "BilateralPatientPair",
     "compute_perceptual_hash",
     "deduplicate_records_by_phash",
     "create_patient_stratified_splits",

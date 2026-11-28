@@ -7,7 +7,7 @@ Addresses Bottleneck 7 from the forensic paper audit:
 - Pairs bilateral scans (OD & OS) for patient-level worse-eye referral aggregation.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 import cv2
@@ -30,33 +30,6 @@ class RetinalDatasetRecord:
     phash: Optional[int] = None
     is_augmented: bool = False
     fold: int = -1
-
-
-@dataclass
-class BilateralPatientPair:
-    """Bilateral fundus examination pairing Right (OD) and Left (OS) eyes."""
-
-    patient_id: str
-    od_record: Optional[RetinalDatasetRecord] = None
-    os_record: Optional[RetinalDatasetRecord] = None
-    metadata: Dict[str, str] = field(default_factory=dict)
-
-    @property
-    def patient_worse_dr_grade(self) -> int:
-        """International ophthalmic screening standard: patient grade = worse eye grade."""
-        grades = []
-        if self.od_record is not None:
-            grades.append(self.od_record.dr_grade)
-        if self.os_record is not None:
-            grades.append(self.os_record.dr_grade)
-        if not grades:
-            raise ValueError(f"Patient {self.patient_id} has neither OD nor OS record.")
-        return int(max(grades))
-
-    @property
-    def is_referable_dr(self) -> bool:
-        """Referable Diabetic Retinopathy is defined as ICDR Grade >= 2 in either eye."""
-        return self.patient_worse_dr_grade >= 2
 
 
 def compute_perceptual_hash(image_rgb: np.ndarray, hash_size: int = 8) -> int:
@@ -220,22 +193,6 @@ def create_patient_stratified_splits(
         "test": test_records,
         "augmented_train_only": safe_augmented,
     }
-
-
-def group_bilateral_pairs(
-    records: List[RetinalDatasetRecord],
-) -> List[BilateralPatientPair]:
-    """Group eye-level records by `patient_id` into BilateralPatientPair objects."""
-    by_patient: Dict[str, BilateralPatientPair] = {}
-    for rec in records:
-        if rec.patient_id not in by_patient:
-            by_patient[rec.patient_id] = BilateralPatientPair(patient_id=rec.patient_id)
-        pair = by_patient[rec.patient_id]
-        if rec.laterality.upper() == "OD":
-            pair.od_record = rec
-        else:
-            pair.os_record = rec
-    return list(by_patient.values())
 
 
 STAGE1_LABEL_MASK_COLUMNS = ("mask_dr", "mask_glaucoma", "mask_cataract")

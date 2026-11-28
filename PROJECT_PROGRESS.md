@@ -80,7 +80,7 @@ All authoritative scans from `dataset-1.zip` (`4,217`) and `dataset-3.zip` (`3,6
 ## 5. Verification & Unit Test Suite
 
 All **31 unit tests** in `tests/` pass (`pytest tests -q`):
-- `tests/test_no_patient_leakage.py`: Verifies perceptual hash deduplication, zero `patient_id` overlap across CV folds/test split, and bilateral OD/OS worse-eye aggregation.
+- `tests/test_no_patient_leakage.py`: Verifies perceptual hash deduplication and zero `patient_id` overlap across CV folds/test split (worse-eye aggregation is tested in `test_report_safety.py`).
 - `tests/test_microlesion_retention.py`: Verifies Fourier Domain Adaptation (`FDA`) and Residual Attention U-Net CDAE preserve `<10px` microaneurysms without hallucination.
 - `tests/test_ordinal_metrics.py`: Verifies `CORALOrdinalFocalLoss`, differentiable `SoftQWKLoss`, `AsymmetricFocalLoss`, and Nelder-Mead simplex QWK threshold optimization.
 - `tests/test_report_safety.py`: Verifies deterministic clinical report generation, low-confidence abstention safety gates, and HTML/PDF output integrity.
